@@ -28,8 +28,22 @@ typedef size_t    usize;
 #define alignof(x)   (ptrdiff_t) _Alignof(x)
 #define countof(a)   (sizeof(a) / sizeof(*(a)))
 #define lengthof(s)  (countof(s) - 1)
+#define s8(s)        (s8){(u8 *)s, countof(s)-1}
+
+struct {
+    u8  *data;
+    size len;
+} s8;
 
 #define PAGE_SZ 4096
+
+static struct s8 s8cstr(char *s)
+{
+    s8 r = {0};
+    r.data = (u8 *) s;
+    r.len = strlen(s);
+    return r;
+}
 
 /*
   * Increase p_shoff by PAGE_SIZE in the ELF header
@@ -99,12 +113,14 @@ static Elf32_Ehdr *get_ehdr(void *buf)
 
 static Elf32_Phdr *get_text_phdr(Elf32_Ehdr *ehdr, Elf32_Phdr *phdrs)
 {
-    for (int i = 0; i < ehdr->e_phnum; i++)
+    for (i32 i = 0; i < ehdr->e_phnum; i++)
     {
-        if (phdrs[i].p_type == PT_LOAD && phdr[i].p_offset == 0)
+        if (phdrs[i].p_type == PT_LOAD
+            && (phdr[i].p_flags & PF_R)
+            && (phdr[i].p_flags & PF_X))
         {
-            // Assumption is that the first loadable segment starting
-            // at offset 0 in the file is the text segment.
+            // Assumption is that the first loadable segment that's
+            // read executable in the file is the text segment.
             return phdrs + i;
         }
     }
@@ -113,7 +129,8 @@ static Elf32_Phdr *get_text_phdr(Elf32_Ehdr *ehdr, Elf32_Phdr *phdrs)
 
 }
 
-static bool insert_entry(int fd, u8 *target_buf, u8 *entry_buf, size entry_sz, size offset)
+static bool inject_code(struct s8 target_fname, u8 *target_buf,
+                        u8 *code_buf, size code_sz, size offset)
 {
     Elf32_Ehdr *ehdr;
     if (!(ehdr = get_ehdr(target_buf)))
@@ -128,44 +145,53 @@ static bool insert_entry(int fd, u8 *target_buf, u8 *entry_buf, size entry_sz, s
     {
         return false;
     }
-    // Is there enough padding available for entry to be inserted?
-    size padding = -(uptr) (text_phdr->p_vaddr + text_phdr->p_file_sz) & (PAGE_SZ - 1);
-    if (entry_sz > padding)
+    
+    // Is there enough padding available for code to be inserted?
+    uptr insert_pos = text_phdr->p_offset + text_phdr->p_filesz;
+    size padding = -insert_pos & (PAGE_SZ - 1);
+    if (code_sz > padding)
     {
         fprintf(stderr, "error: not enough space to insert\n");
         return false;
     }
-    // File offsets and virtual address of each segment must be modular
+    // File offsets and virtual address of each segment must be modular         
     // congruent to the page size.  For this reason, a page of data must be
-    // inserted into the file even though entry size is less than a page.
+    // inserted into the file even though code size is less than a page.
     // Adjust all segments and sections file offsets that occur after the text
     // text segment by a page to account for this.
-    for (int i = 0; i < ehdr->e_phnum; i++)
+    for (i32 i = 0; i < ehdr->e_phnum; i++)
     {
         if (phdrs[i].p_offset > text_phdr->p_offset + text_phdr->file_sz)
         {
             phdrs[i].p_offset += PAGE_SZ;
         }
     }
-    for (int i = 1; i < ehdr->e_shnum; i++)
+    for (i32 i = 1; i < ehdr->e_shnum; i++)
     {
-        if (shdrs[i].p_offset > text_phdr->p_offset + text_phdr->file_sz)
+        if (shdrs[i].sh_offset > text_phdr->p_offset + text_phdr->file_sz)
         {
-            shdrs[i].p_offset += PAGE_SZ;
+            shdrs[i].sh_offset += PAGE_SZ;
         }
     }
     // Increase the size of the text segment in the file and in memory by the
-    // entry size.  Even though a page of data is going to be inserted
-    // into the file, the sizes must only be adjusted by entry size to avoid
+    // code size.  Even though a page of data is going to be inserted
+    // into the file, the sizes must only be adjusted by code size to avoid
     // possibly spilling over to the next segment in memory.
-    text_phdr->p_filesz += entry_sz;
-    text_phdr->p_memsz += entry_sz;
-    // Since entry is inserted at the end of the text segment, the size of the last
-    // section header in the text segment must be increased by entry size.
-
-
-    // increase the size of the last section in the text header by entry size
+    text_phdr->p_filesz += code_sz;
+    text_phdr->p_memsz += code_sz;
+    // Since code is inserted at the end of the text segment, the size of the
+    // last section header in the text segment must be increased by code size.
+    for (i32 i = 1; i < ehdr->e_shnum; i++)
+    {
+        if (shdrs[i].sh_offset + shdrs[i].sh_size == insert_pos)
+        {
+            shdrs[i].sh_size += code_sz;
+            break;
+        }
+    }
     // adjust entry point
+    ehdr->e_entry = xx;
+    // patch entry point
     // insert code
     return true;
 }
@@ -174,7 +200,7 @@ int main(int argc, char **argv)
 {
     if (argc != 4)
     {
-        printf("usage: insert_entry <target> <entry> <host entry offset>\n");
+        printf("usage: insert_entry <target> <code> <host entry offset>\n");
         return EXIT_FAILURE;
     }
 
@@ -184,39 +210,41 @@ int main(int argc, char **argv)
         fprintf(stderr, "error: invalid offset\n");
         return EXIT_FAILURE;
     }
-    
+
+    struct s8 target_fname = s8cstr(argv[1]);
+    struct s8 code_fname = s8cstr(argv[2]);
     int target_fd;
-    int entry_fd;
-    if ((target_fd = open(argv[1], O_RDWR)) < 0
-        || (entry_fd = open(argv[1], O_RDONLY)) < 0)
+    int code_fd;
+    if ((target_fd = open(target_fname.data, O_RDONLY)) < 0
+        || (code_fd = open(code_fname.data, O_RDONLY)) < 0)
     {
         perror("open");
         return EXIT_FAILURE;
     }
 
     struct stat target_stat;
-    struct stat entry_stat;
+    struct stat code_stat;
     if (fstat(target_fd, &target_stat) < 0
-        || fstat(entry_fd, &entry_stat) < 0)
+        || fstat(code_fd, &code_stat) < 0)
     {
         perror("fstat");
         return EXIT_FAILURE;
     }
 
-    if (entry_stat.st_size > PAGE_SZ)
+    if (code_stat.st_size > PAGE_SZ)
     {
-        fprintf(stderr, "error: entry size can't exceed %d bytes\n",
+        fprintf(stderr, "error: code size can't exceed %d bytes\n",
             PAGE_SZ);
         return EXIT_FAILURE;
     }
 
-    u8 *entry_buf[PAGE_SIZE];
-    if (read(entry_fd, entry_buf, entry_stat.st_size) != entry_stat.st_size)
+    u8 code_buf[PAGE_SIZE];
+    if (read(code_fd, code_buf, code_stat.st_size) != code_stat.st_size)
     {
-        fprintf(stderr, "error: failed to read entry\n");
+        perror("read");
         return EXIT_FAILURE;
     }
-    close(entry_fd);
+    close(code_fd);
                 
     void *target_buf;
     if ((target_buf = mmap(NULL, target_stat.st_size, PROT_READ | PROT_WRITE,
@@ -226,7 +254,8 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
-    if (!insert_entry(target_fd, target_buf, entry_buf, entry_stat.st_size, offset))
+    if (!inject_code(target_fname, target_buf, code_buf, code_stat.st_size,
+                     offset))
     {
         return EXIT_FAILURE;
     }
