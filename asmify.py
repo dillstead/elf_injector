@@ -1,3 +1,12 @@
+def esc(line):
+    escapes = {
+        '\\' : '\\\\',
+        '"' : '\\"',
+        "'" : "\\'"
+        
+        }
+    return ''.join(escapes.get(c, c) for c in line)
+
 def asmify(fname):
     try:
         with open(fname, "r") as fin:
@@ -6,7 +15,7 @@ def asmify(fname):
             print("{")
             print("asm (")
             for line in fin:
-                print(f"\"{line.strip()}\\n\"")
+                print(f"\"{esc(line.strip())}\\n\"")
             print(");")
             print("};")
     except Exception as e:

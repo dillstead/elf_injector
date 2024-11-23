@@ -1,0 +1,17 @@
+Too many registers being used for SWI instructions
+Can _start not take any parameters?
+
+
+ldr     r0, [sp]
+add     r1, sp, #4
+push	{r0-r12, lr}
+    
+pop	    {r0-r12, lr}
+ldr     ip, .L24|\n"
+bx      ip
+
+set environment LD_PRELOAD /lib/arm-linux-gnueabihf/libasan.so.6
+x/nfu
+    
+x addr
+display/i $pc
