@@ -1,5 +1,7 @@
-// LC_ALL=C LANG=C gcc -Werror -std=c99 -Wall -Wextra -Wno-error=unused-parameter -Wno-error=unused-function -Wno-error=unused-variable -Wconversion -Wno-error=sign-conversion -fsanitize=address,undefined -fno-diagnostics-color -g3 -o elf_injector elf_injector.c
+// gcc -Werror -std=c99 -Wall -Wextra -Wno-error=unused-parameter -Wno-error=unused-function -Wno-error=unused-variable -Wconversion -Wno-error=sign-conversion -fsanitize=address,undefined -fno-diagnostics-color -g3 -fno-omit-frame-pointer -o elf_injector elf_injector.c
 // LD_PRELOAD=/lib/arm-linux-gnueabihf/libasan.so.6 ./elf_injector
+// To debug with gdb: set environment ASAN_OPTIONS=abort_on_error=1:detect_leak=0
+//                    set environment LD_PRELOAD=/lib/arm-linux-gnueabihf/libasan.so.6 
 #include <stdlib.h>
 #include <stdio.h>
 #include <elf.h>
@@ -30,9 +32,11 @@ typedef size_t    usize;
 #define alignof(x)       (ptrdiff_t) _Alignof(x)
 #define countof(a)       (sizeof(a) / sizeof(*(a)))
 #define lengthof(s)      (countof(s) - 1)
-#define s8(s)            (struct s8){(u8 *)s, countof(s)-1}
+#define s8(s)            (struct s8){(u8 *)s, lengthof(s)}
 
-#define APPEND_STR(b, s) append(b, s.data, s.len)
+#define APPEND_STR(b, s) append(b, (const u8 *) s, sizeof(s) - 1)
+#define APPEND_S8(b, s)  append(b, s.data, s.len)
+#define APPEND_NUL(b)    append(b, (const u8 *) "", 1)
 #define MEMBUF(buf, cap) { buf, cap, 0, 0 }
 
 struct s8
@@ -51,7 +55,7 @@ struct buf
 
 #define PAGE_SZ 4096
 
-static struct s8 s8cstr(char *s)
+static struct s8 s8cstr(const char *s)
 {
     struct s8 r = {0};
     r.data = (u8 *) s;
@@ -59,7 +63,7 @@ static struct s8 s8cstr(char *s)
     return r;
 }
 
-static void append(struct buf *buf, u8 *src, size len)
+static void append(struct buf *buf, const u8 *src, size len)
 {
     size avail = buf->cap - buf->len;
     size amount = avail < len ? avail : len;
@@ -121,10 +125,11 @@ static bool output_target(struct s8 target_fname, u8 *target_buf,
                           size target_sz, size insert_pos,
                           u8 *code_buf)
 {
-    u8 buf[4096];
+    u8 buf[1 << 12];
     struct buf output_fname = MEMBUF(buf, sizeof(buf));
-    APPEND_STR(&output_fname, target_fname);
-    APPEND_STR(&output_fname, s8(".injected"));
+    APPEND_S8(&output_fname, target_fname);
+    APPEND_STR(&output_fname, ".injected");
+    APPEND_NUL(&output_fname);
 
     int output_fd;
     if ((output_fd = open((char *) output_fname.data,
@@ -250,7 +255,7 @@ int main(int argc, char **argv)
     struct s8 code_fname = s8cstr(argv[2]);
     int target_fd;
     int code_fd;
-    if ((target_fd = open((char *) target_fname.data, O_RDONLY)) < 0
+    if ((target_fd = open((char *) target_fname.data, O_RDWR)) < 0
         || (code_fd = open((char *) code_fname.data, O_RDONLY)) < 0)
     {
         perror("open");
@@ -288,7 +293,6 @@ int main(int argc, char **argv)
     }
 
     u8 code_buf[PAGE_SZ];
-    memset(code_buf, 0xFF, PAGE_SZ);
     if (read(code_fd, code_buf, (usize) code_stat.st_size) != code_stat.st_size)
     {
         perror("read");
