@@ -28,8 +28,8 @@ typedef char      byte;
 typedef ptrdiff_t size;
 typedef size_t    usize;
 
-#define sizeof(x)        (ptrdiff_t) sizeof(x)
-#define alignof(x)       (ptrdiff_t) _Alignof(x)
+#define sizeof(x)        (size) sizeof(x)
+#define alignof(x)       (size) _Alignof(x)
 #define countof(a)       (sizeof(a) / sizeof(*(a)))
 #define lengthof(s)      (countof(s) - 1)
 #define s8(s)            (struct s8){(u8 *)s, lengthof(s)}
@@ -122,7 +122,7 @@ static Elf32_Phdr *get_text_phdr(Elf32_Ehdr *ehdr, Elf32_Phdr *phdrs)
 }
 
 static bool output_target(struct s8 target_fname, u8 *target_buf,
-                          size target_sz, size insert_pos,
+                          size target_sz, size insert_offset,
                           u8 *code_buf)
 {
     u8 buf[1 << 12];
@@ -138,10 +138,11 @@ static bool output_target(struct s8 target_fname, u8 *target_buf,
         perror("open");
         return false;
     }
-    if (write(output_fd, target_buf, (usize) insert_pos) != insert_pos
+
+    size remain_len = target_sz - insert_offset;
+    if (write(output_fd, target_buf, (usize) insert_offset) != insert_offset
         || write(output_fd, code_buf, PAGE_SZ) != PAGE_SZ
-        || write(output_fd, target_buf + insert_pos,
-                 (usize) (target_sz - insert_pos)) != target_sz - insert_pos)
+        || write(output_fd, target_buf + insert_offset, (usize) remain_len) != remain_len)
     {
         perror("write");
         return false;
@@ -151,7 +152,7 @@ static bool output_target(struct s8 target_fname, u8 *target_buf,
 }
 
 static bool inject_code(struct s8 target_fname, u8 *target_buf,
-                        size target_sz, u8 *code_buf, size code_sz,
+                        size target_len, u8 *code_buf, size code_len,
                         size entry_offset, size host_entry_offset)
 {
     Elf32_Ehdr *ehdr;
@@ -168,14 +169,14 @@ static bool inject_code(struct s8 target_fname, u8 *target_buf,
         return false;
     }
     // Is there enough padding available for code to be inserted?
-    size insert_pos = (size) (text_phdr->p_offset + text_phdr->p_filesz);
-    if (insert_pos < 0)
+    size insert_offset = (size) (text_phdr->p_offset + text_phdr->p_filesz);
+    if (insert_offset < 0)
     {
         fprintf(stderr, "error: invalid insert position\n");
         return false;
     }
-    size padding = -(usize) insert_pos & (PAGE_SZ - 1);
-    if (code_sz > padding)
+    size padding = -(usize) insert_offset & (PAGE_SZ - 1);
+    if (code_len > padding)
     {
         fprintf(stderr, "error: not enough padding\n");
         return false;
@@ -183,18 +184,18 @@ static bool inject_code(struct s8 target_fname, u8 *target_buf,
     // File offsets and virtual address of each segment must be modular         
     // congruent to the page size.  For this reason, a page of data must be
     // inserted into the file even though code size is less than a page.
-    // Adjust all segments and sections file offsets that occur after the
+    // Adjust all segment and section file offsets that occur after the
     // text segment by a page to account for this.
     for (i32 i = 0; i < ehdr->e_phnum; i++)
     {
-        if (phdrs[i].p_offset > text_phdr->p_offset + text_phdr->p_filesz)
+        if (phdrs[i].p_offset > insert_offset)
         {
             phdrs[i].p_offset += PAGE_SZ;
         }
     }
     for (i32 i = 1; i < ehdr->e_shnum; i++)
     {
-        if (shdrs[i].sh_offset > text_phdr->p_offset + text_phdr->p_filesz)
+        if (shdrs[i].sh_offset > insert_offset)
         {
             shdrs[i].sh_offset += PAGE_SZ;
         }
@@ -203,7 +204,7 @@ static bool inject_code(struct s8 target_fname, u8 *target_buf,
     // last section header in the text segment must be increased by code size.
     for (i32 i = 1; i < ehdr->e_shnum; i++)
     {
-        if (shdrs[i].sh_offset + shdrs[i].sh_size == (usize) insert_pos)
+        if (shdrs[i].sh_offset + shdrs[i].sh_size == (usize) insert_offset)
         {
             // The last section must not be stripped out when loaded.
             if (shdrs[i].sh_type != SHT_PROGBITS)
@@ -211,7 +212,7 @@ static bool inject_code(struct s8 target_fname, u8 *target_buf,
                 fprintf(stderr, "error: last section stripped\n");
                 return false;
             }
-            shdrs[i].sh_size += (usize) code_sz;
+            shdrs[i].sh_size += (usize) code_len;
             break;
         }
     }
@@ -227,14 +228,14 @@ static bool inject_code(struct s8 target_fname, u8 *target_buf,
     // into the file, the sizes must only be adjusted by code size to avoid
     // possibly spilling over to the next segment in memory if it happens to
     // be mapped adjacent to the end of the text segment.
-    text_phdr->p_filesz += (usize) code_sz;
-    text_phdr->p_memsz += (usize) code_sz;
+    text_phdr->p_filesz += (usize) code_len;
+    text_phdr->p_memsz += (usize) code_len;
     // The section headers should always be after the insertion.
-    if (ehdr->e_shoff > (usize) insert_pos)
+    if (ehdr->e_shoff > (usize) insert_offset)
     {
         ehdr->e_shoff += PAGE_SZ;
     }
-    if (!output_target(target_fname, target_buf, target_sz, insert_pos,
+    if (!output_target(target_fname, target_buf, target_len, insert_offset,
                        code_buf))
     {
         return false;
@@ -272,14 +273,14 @@ int main(int argc, char **argv)
     }
 
     size entry_offset = atoi(argv[3]);
-    if (entry_offset < 0 || entry_offset > target_stat.st_size - 1)
+    if (entry_offset < 0 || entry_offset > code_stat.st_size - 1)
     {
         fprintf(stderr, "error: invalid entry offset\n");
         return EXIT_FAILURE;
     }
     
     size host_entry_offset = atoi(argv[4]);
-    if (host_entry_offset < 0 || host_entry_offset > target_stat.st_size - 1)
+    if (host_entry_offset < 0 || host_entry_offset > code_stat.st_size - 1)
     {
         fprintf(stderr, "error: invalid host entry offset\n");
         return EXIT_FAILURE;
