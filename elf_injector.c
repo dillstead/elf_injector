@@ -188,14 +188,14 @@ static bool inject_code(struct s8 target_fname, u8 *target_buf,
     // text segment by a page to account for this.
     for (i32 i = 0; i < ehdr->e_phnum; i++)
     {
-        if (phdrs[i].p_offset > insert_offset)
+        if (phdrs[i].p_offset > (usize) insert_offset)
         {
             phdrs[i].p_offset += PAGE_SZ;
         }
     }
     for (i32 i = 1; i < ehdr->e_shnum; i++)
     {
-        if (shdrs[i].sh_offset > insert_offset)
+        if (shdrs[i].sh_offset > (usize) insert_offset)
         {
             shdrs[i].sh_offset += PAGE_SZ;
         }
