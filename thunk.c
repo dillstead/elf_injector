@@ -1,6 +1,10 @@
-//#include <unistd.h>
-//#include <stddef.h>
-//#include <syscall.h>
+// Thunk that loads and runs injected code and returns control
+// to the original entry point when it's finished. 
+#include <unistd.h>
+#include <stddef.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <syscall.h>
 
 typedef __UINT8_TYPE__   u8;
 typedef __INT32_TYPE__   b32;
@@ -11,12 +15,14 @@ typedef __PTRDIFF_TYPE__ size;
 typedef __UINTPTR_TYPE__ uptr;
 typedef char             byte;
 
-#define SYSCALL1(n, a)                          \
-    syscall6(n,(long)(a),0,0,0,0,0)
-#define SYSCALL2(n, a, b) \
-    syscall6(n,(long)(a),(long)(b),0,0,0,0)
-#define SYSCALL5(n, a, b, c, d, e) \
-    syscall6(n,(long)(a),(long)(b),(long)(c),(long)(d),(long)(e),0)
+#define PGBITS  12                         
+#define PGSIZE  (1 << PGBITS)              
+#define SYSCALL1(n, a)                \
+    syscall1(n,(long)(a))
+#define SYSCALL2(n, a, b)             \
+    syscall2(n,(long)(a),(long)(b))
+#define SYSCALL6(n, a, b, c, d, e, f) \
+    syscall6(n,(long)(a),(long)(b), (long)(c), (long)(d), (long)(e), (long)(f))
 
 static long syscall1(long n, long a)
 {
@@ -41,13 +47,13 @@ static long syscall2(long n, long a, long b)
     __asm volatile (
         "swi #0\n"
         : "=r"(ret)
-        : "r"(r7), "r"(r0), "r"(r1),
+        : "r"(r7), "r"(r0), "r"(r1)
         : "r9", "r12", "r14", "memory"
     );
     return ret;
 }
 
-static long syscall5(long n, long a, long b, long c, long d, long e)
+static long syscall6(long n, long a, long b, long c, long d, long e, long f)
 {
     register long ret asm("r0");
     register long r7 asm("r7") = n;
@@ -56,47 +62,44 @@ static long syscall5(long n, long a, long b, long c, long d, long e)
     register long r2 asm("r2") = c;
     register long r3 asm("r3") = d;
     register long r4 asm("r4") = e;
+    register long r5 asm("r5") = f;
     __asm volatile (
         "swi #0\n"
         : "=r"(ret)
-        : "r"(r7), "r"(r0), "r"(r1), "r"(r2), "r"(r3), "r"(r4)
+        : "r"(r7), "r"(r0), "r"(r1), "r"(r2), "r"(r3), "r"(r4), "r"(r5)
         : "r9", "r12", "r14", "memory"
     );
     return ret;
 }
 
-#define PAGE_SZ 4096
+// These values will be patched by elf_injector at injection time.
+static volatile size code_off = 0x00000001;        // offset 204
+static volatile size code_len = 0x00000002;        // offset 208
+static volatile size code_entry_off = 0x00000003;  // offset 212
+static volatile size host_entry = 0x00000004;      // offset 216
 
-// These values will be patched by elf_xinjector at injection time.
-static size code_offset = -1;
-static size code_len = -2;
-static size code_entry_offset = -3;
-
+// _start offset: 0
 void _start(int argc, char **argv)
 {
-    int fd;
+    int fd = -1;
     if ((fd = (int) SYSCALL2(SYS_open, argv[0], O_RDONLY)) == -1)
     {
-        goto done;
+        goto cleanup;
     }
 
-    // Must be a multiple of page size.
-    size code_pg_offset = code_offset & ~(PAGE_SZ - 1);
-    aize code_pg_len = code_offset - code_poffset + code_len;
     u8 *code;
-    if ((code = (u8 *) SYSCALL5(SYS_mmap, NULL, code_plen,
+    if ((code = (u8 *) SYSCALL6(SYS_mmap2, NULL, code_len,
                                 PROT_READ | PROT_EXEC,
-                                MAP_PRIVATE, fd, code_poffset)) == MAP_FAILED)
+                                MAP_PRIVATE, fd, code_off)) == MAP_FAILED)
     {
-        goto done;
+        goto cleanup;
     }
+    
     void (*code_entry)(int, char **)
-        = void (*)(int, char **) (code + (code_offset - code_poffset) + code_entry_offset);
+          = (void (*)(int, char **)) (code + code_entry_off);
     code_entry(argc, argv);
-    SYSCALL2(SYS_munmap, code, code_plen);
-done:
+    SYSCALL2(SYS_munmap, code, code_len);
+cleanup:
     SYSCALL1(SYS_close, fd);
-    // Manually patch in call to host entry point here.
-    // Entry offset to start running: 0/0x****
-    // Host entry offset from beginning of file: 0/0x****
+    ((void (*)(void)) host_entry)();
 }

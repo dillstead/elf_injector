@@ -63,6 +63,7 @@ static b32 full_write(const u8 *s, i32 len)
     return 1;
 }
 
+// _start offset: 20
 void _start(int argc, char **argv)
 {
     full_write((const u8 *) "Hello World!\n", lengthof("Hello World!\n"));
@@ -71,7 +72,4 @@ void _start(int argc, char **argv)
         full_write((const u8 *) argv[i], slen(argv[i]));
         full_write((const u8 *) "\n", lengthof("\n"));
     }
-    // Manually patch in call to host entry point here.
-    // Entry offset to start running: 0/0x0
-    // Host entry offset from beginning of file: 326/0x146
 }

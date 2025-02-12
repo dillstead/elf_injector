@@ -1,7 +1,5 @@
-// gcc -Werror -std=c99 -Wall -Wextra -Wno-error=unused-parameter -Wno-error=unused-function -Wno-error=unused-variable -Wconversion -Wno-error=sign-conversion -fsanitize=address,undefined -fno-diagnostics-color -g3 -fno-omit-frame-pointer -o elf_injector elf_injector.c
 // LD_PRELOAD=/lib/arm-linux-gnueabihf/libasan.so.6 ./elf_injector
-// To debug with gdb: set environment ASAN_OPTIONS=abort_on_error=1:detect_leak=0
-//                    set environment LD_PRELOAD=/lib/arm-linux-gnueabihf/libasan.so.6 
+#define _DEFAULT_SOURCE
 #include <stdlib.h>
 #include <stdio.h>
 #include <elf.h>
@@ -14,6 +12,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <assert.h>
 
 typedef uint8_t   u8;
 typedef int32_t   i32;
@@ -28,16 +27,55 @@ typedef char      byte;
 typedef ptrdiff_t size;
 typedef size_t    usize;
 
-#define sizeof(x)        (size) sizeof(x)
-#define alignof(x)       (size) _Alignof(x)
-#define countof(a)       (sizeof(a) / sizeof(*(a)))
-#define lengthof(s)      (countof(s) - 1)
+#define sizeof(x)    (size) sizeof(x)
+#define alignof(x)   (size) _Alignof(x)
+#define countof(a)   (sizeof(a) / sizeof(*(a)))
+#define lengthof(s)  (countof(s) - 1)
 #define s8(s)            (struct s8){(u8 *)s, lengthof(s)}
+#define new(a, t, n) (t *) alloc(a, sizeof(t), _Alignof(t), n)
 
 #define APPEND_STR(b, s) append(b, (const u8 *) s, sizeof(s) - 1)
 #define APPEND_S8(b, s)  append(b, s.data, s.len)
 #define APPEND_NUL(b)    append(b, (const u8 *) "", 1)
 #define MEMBUF(buf, cap) { buf, cap, 0, 0 }
+
+#define PGSIZE  (1 << 12)
+
+static u8 thunk[] = 
+{
+    0xff, 0x4f, 0x2d, 0xe9, 0x34, 0x00, 0x9d, 0xe5, 
+    0x38, 0x10, 0x8d, 0xe2, 0x01, 0x60, 0xa0, 0xe1, 
+    0x00, 0x80, 0xa0, 0xe1, 0x05, 0x70, 0xa0, 0xe3, 
+    0x00, 0x00, 0x91, 0xe5, 0x00, 0x10, 0xa0, 0xe3, 
+    0x00, 0x00, 0x00, 0xef, 0x01, 0x00, 0x70, 0xe3, 
+    0x00, 0x40, 0xa0, 0xe1, 0x14, 0x00, 0x00, 0x0a, 
+    0x6c, 0xa0, 0x9f, 0xe5, 0x01, 0x00, 0xa0, 0xe1, 
+    0x0a, 0xa0, 0x8f, 0xe0, 0xc0, 0x70, 0xa0, 0xe3, 
+    0x00, 0x10, 0x9a, 0xe5, 0x05, 0x20, 0xa0, 0xe3, 
+    0x04, 0x50, 0x9a, 0xe5, 0x02, 0x30, 0xa0, 0xe3, 
+    0x00, 0x00, 0x00, 0xef, 0x01, 0x00, 0x70, 0xe3, 
+    0x00, 0x50, 0xa0, 0xe1, 0x08, 0x00, 0x00, 0x0a, 
+    0x08, 0x30, 0x9a, 0xe5, 0x06, 0x10, 0xa0, 0xe1, 
+    0x08, 0x00, 0xa0, 0xe1, 0x03, 0x30, 0x85, 0xe0, 
+    0x33, 0xff, 0x2f, 0xe1, 0x5b, 0x70, 0xa0, 0xe3, 
+    0x00, 0x10, 0x9a, 0xe5, 0x05, 0x00, 0xa0, 0xe1, 
+    0x00, 0x00, 0x00, 0xef, 0x06, 0x70, 0xa0, 0xe3, 
+    0x04, 0x00, 0xa0, 0xe1, 0x00, 0x00, 0x00, 0xef, 
+    0x10, 0xc0, 0x9f, 0xe5, 0x0c, 0xc0, 0x8f, 0xe0, 
+    0x0c, 0xc0, 0x9c, 0xe5, 0xff, 0x4f, 0xbd, 0xe8, 
+    0x1c, 0xff, 0x2f, 0xe1, 0x6c, 0x00, 0x00, 0x00, 
+    0x10, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 
+    0x01, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 
+    0x04, 0x00, 0x00, 0x00
+};
+static size thunk_len = sizeof(thunk);
+static size thunk_entry_off = 0;
+// Offsets in thunk for locations that need to be patched at injection so it's
+// able to load and execute the injected code.
+static size thunk_off_code_off = 176;
+static size thunk_off_code_len = 172;
+static size thunk_off_code_entry_off = 180;
+static size thunk_off_host_entry = 184;
 
 struct s8
 {
@@ -53,7 +91,12 @@ struct buf
     bool error;
 };
 
-#define PAGE_SZ 4096
+struct arena
+{
+    u8 *beg;
+    u8 *end;
+    u8 **commit;
+};
 
 static struct s8 s8cstr(const char *s)
 {
@@ -73,6 +116,51 @@ static void append(struct buf *buf, const u8 *src, size len)
     }
     buf->len += amount;
     buf->error |= amount < len;
+}
+
+static bool new_arena(struct arena *arena, size sz)
+{
+    if (sz <= 0)
+    {
+        return false;
+    }
+    sz += sizeof(arena->commit);
+    arena->beg = mmap(NULL, (usize) sz, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (arena->beg == MAP_FAILED)
+    {
+        return false;
+    }
+    if (mprotect(arena->beg, PGSIZE, PROT_READ | PROT_WRITE) == -1)
+    {
+        return false;
+    }
+    arena->end = arena->beg + sz;
+    arena->commit = (u8 **) arena->beg;
+    *arena->commit = arena->beg + PGSIZE;
+    arena->beg += sizeof(arena->commit);
+    return true;
+}
+
+static void *alloc(struct arena *arena, size sz, size align, size count)
+{
+    size pad = -(iptr) arena->beg & (align - 1);
+    size avail = arena->end - arena->beg - pad;
+    if (avail < 0 || count >  avail / sz)
+    {
+        return NULL;
+    }
+    u8 *p = arena->beg + pad;
+    arena->beg += pad + count * sz;
+    if (arena->beg >= *arena->commit)
+    {
+        if (mprotect(*arena->commit, (size_t) (arena->beg - *arena->commit + 1),
+                     PROT_READ | PROT_WRITE) == -1)
+        {
+            return NULL;
+        }
+        *arena->commit = (u8 *) ((iptr) (arena->beg + (PGSIZE - 1)) & ~(PGSIZE - 1));
+    }
+    return memset(p, 0, (size_t) (count * sz));
 }
 
 static Elf32_Ehdr *get_ehdr(void *buf)
@@ -122,8 +210,9 @@ static Elf32_Phdr *get_text_phdr(Elf32_Ehdr *ehdr, Elf32_Phdr *phdrs)
 }
 
 static bool output_target(struct s8 target_fname, u8 *target_buf,
-                          size target_sz, size insert_offset,
-                          u8 *code_buf)
+                          size target_len, size insert_off,
+                          u8 *thunk_buf, size thunk_len,
+                          u8 *code_buf, size code_len)
 {
     u8 buf[1 << 12];
     struct buf output_fname = MEMBUF(buf, sizeof(buf));
@@ -138,11 +227,12 @@ static bool output_target(struct s8 target_fname, u8 *target_buf,
         perror("open");
         return false;
     }
-
-    size remain_len = target_sz - insert_offset;
-    if (write(output_fd, target_buf, (usize) insert_offset) != insert_offset
-        || write(output_fd, code_buf, PAGE_SZ) != PAGE_SZ
-        || write(output_fd, target_buf + insert_offset, (usize) remain_len) != remain_len)
+    
+    size remain_len = target_len - insert_off;
+    if (write(output_fd, target_buf, (usize) insert_off) != insert_off
+        || write(output_fd, thunk_buf, (usize) thunk_len) != thunk_len
+        || write(output_fd, code_buf, (usize) code_len) != code_len
+        || write(output_fd, target_buf + insert_off, (usize) remain_len) != remain_len)
     {
         perror("write");
         return false;
@@ -151,60 +241,96 @@ static bool output_target(struct s8 target_fname, u8 *target_buf,
     return true;
 }
 
-static bool inject_code(struct s8 target_fname, u8 *target_buf,
-                        size target_len, u8 *code_buf, size code_len,
-                        size entry_offset, size host_entry_offset)
+static bool inject_code(struct arena *arena, struct s8 target_fname, u8 *target,
+                        size target_len, u8 *code, size code_len, size code_entry_off)
 {
     Elf32_Ehdr *ehdr;
-    if (!(ehdr = get_ehdr(target_buf)))
+    if (!(ehdr = get_ehdr(target)))
     {
         return false;
     }
     
-    Elf32_Phdr *phdrs = (Elf32_Phdr *) (target_buf + ehdr->e_phoff);
-    Elf32_Shdr *shdrs = (Elf32_Shdr *) (target_buf + ehdr->e_shoff);
+    Elf32_Phdr *phdrs = (Elf32_Phdr *) (target + ehdr->e_phoff);
+    Elf32_Shdr *shdrs = (Elf32_Shdr *) (target + ehdr->e_shoff);
     Elf32_Phdr *text_phdr;
     if (!(text_phdr = get_text_phdr(ehdr, phdrs)))
     {
         return false;
     }
-    // Is there enough padding available for code to be inserted?
-    size insert_offset = (size) (text_phdr->p_offset + text_phdr->p_filesz);
-    if (insert_offset < 0)
+
+    size insert_off = (size) (text_phdr->p_offset + text_phdr->p_filesz);
+    if (insert_off < 0)
     {
         fprintf(stderr, "error: invalid insert position\n");
         return false;
     }
-    size padding = -(usize) insert_offset & (PAGE_SZ - 1);
-    if (code_len > padding)
+
+    // The insertion position must be a multiple of 2, pad the thunk if
+    // necessary.
+    size pad = -insert_off & 1;
+    u8 *thunk_buf;
+    if (!(thunk_buf = new(arena, u8, thunk_len + pad)))
+    {
+        fprintf(stderr, "error: out of memory\n");
+        return false;        
+    }
+    memcpy(thunk_buf + pad, thunk, (usize) thunk_len);
+    thunk_len += pad;
+    thunk_entry_off += pad;
+    thunk_off_code_off += pad;
+    thunk_off_code_len += pad;
+    thunk_off_code_entry_off += pad;
+    thunk_off_host_entry += pad;
+
+    // The thunk must be small enough to fit in the padding at the end of the
+    // text section.  If if's larger, it might spill over into the next
+    // segment in memory if it happens to be mapped adjacent to the end
+    // of the text segment.
+    pad = -insert_off & (PGSIZE - 1);
+    if (thunk_len > pad)
     {
         fprintf(stderr, "error: not enough padding\n");
         return false;
     }
+    
     // File offsets and virtual address of each segment must be modular         
-    // congruent to the page size.  For this reason, a page of data must be
-    // inserted into the file even though code size is less than a page.
-    // Adjust all segment and section file offsets that occur after the
-    // text segment by a page to account for this.
+    // congruent to the page size.  The code is inserted directly after
+    // the thunk so there must be adequate padding to ensure the total
+    // number of bytes inserted in a multiple of page size.
+    pad = -(thunk_len + code_len) & (PGSIZE - 1);
+    u8 *code_buf;
+    if (!(code_buf = new(arena, u8, code_len + pad)))
+    {
+        fprintf(stderr, "error: out of memory\n");
+        return false;        
+    }
+    memcpy(code_buf, code, (usize) code_len);
+    code_len += pad;
+
+    // Update all segment and section file offsets that occur after the
+    // insertion position by the total number of bytes inserted.
+    size total_len = thunk_len + code_len;
+    assert(total_len % PGSIZE == 0);
     for (i32 i = 0; i < ehdr->e_phnum; i++)
     {
-        if (phdrs[i].p_offset > (usize) insert_offset)
+        if (phdrs[i].p_offset > (usize) insert_off)
         {
-            phdrs[i].p_offset += PAGE_SZ;
+            phdrs[i].p_offset += (usize) total_len;
         }
     }
     for (i32 i = 1; i < ehdr->e_shnum; i++)
     {
-        if (shdrs[i].sh_offset > (usize) insert_offset)
+        if (shdrs[i].sh_offset > (usize) insert_off)
         {
-            shdrs[i].sh_offset += PAGE_SZ;
+            shdrs[i].sh_offset += (usize) total_len;
         }
     }
-    // Since code is inserted at the end of the text segment, the size of the
-    // last section header in the text segment must be increased by code size.
+    // Since the thunk is inserted at the end of the text segment, the size
+    // of the last section header in the text segment must be increased by
+    // the length of the thunk.
     for (i32 i = 1; i < ehdr->e_shnum; i++)
     {
-        if (shdrs[i].sh_offset + shdrs[i].sh_size == (usize) insert_offset)
+        if (shdrs[i].sh_offset + shdrs[i].sh_size == (usize) insert_off)
         {
             // The last section must not be stripped out when loaded.
             if (shdrs[i].sh_type != SHT_PROGBITS)
@@ -212,31 +338,43 @@ static bool inject_code(struct s8 target_fname, u8 *target_buf,
                 fprintf(stderr, "error: last section stripped\n");
                 return false;
             }
-            shdrs[i].sh_size += (usize) code_len;
+            shdrs[i].sh_size += (usize) thunk_len;
             break;
         }
     }
-    // Patch the inserted code so that it will call the original entry
-    // point when it finishes.
-    memcpy(code_buf + host_entry_offset, &ehdr->e_entry, sizeof(ehdr->e_entry));
-    // Adjust the target's entry point so it will call the inserted code
-    // when the executable is started. 
+    
+    // Patch the thunk so it can find and execute the code within the file.
+    size code_off = insert_off + thunk_len;
+    size thunk_code_off = code_off & ~(PGSIZE - 1);
+    size thunk_code_len = code_off - thunk_code_off + code_len;
+    size thunk_code_entry_off = code_off - thunk_code_off + code_entry_off;
+    // Thunk uses mmap2 which uses page multiples of offsets instead of number of
+    // bytes.
+    thunk_code_off /= PGSIZE;
+    memcpy(thunk_buf + thunk_off_code_off, &thunk_code_off,
+           sizeof(thunk_code_off));
+    memcpy(thunk_buf + thunk_off_code_len, &thunk_code_len,
+           sizeof(thunk_code_len));
+    memcpy(thunk_buf + thunk_off_code_entry_off, &thunk_code_entry_off,
+           sizeof(thunk_code_entry_off));
+    // Patch the thunk so that it will call the original entry point when it
+    // finishes.
+    memcpy(thunk_buf + thunk_off_host_entry, &ehdr->e_entry, sizeof(ehdr->e_entry));
+    // Adjust the target's entry point so it will call the thunk when the
+    // executable is started,
     ehdr->e_entry = text_phdr->p_vaddr + text_phdr->p_filesz
-        + (usize) entry_offset;
-    // Increase the size of the text segment in the file and in memory by the
-    // code size.  Even though a page of data is going to be inserted
-    // into the file, the sizes must only be adjusted by code size to avoid
-    // possibly spilling over to the next segment in memory if it happens to
-    // be mapped adjacent to the end of the text segment.
-    text_phdr->p_filesz += (usize) code_len;
-    text_phdr->p_memsz += (usize) code_len;
+        + (usize) thunk_entry_off;
+    // Increase the size of the text segment in the file and in memory by thunk
+    // size.  
+    text_phdr->p_filesz += (usize) thunk_len;
+    text_phdr->p_memsz += (usize) thunk_len;
     // The section headers should always be after the insertion.
-    if (ehdr->e_shoff > (usize) insert_offset)
+    if (ehdr->e_shoff > (usize) insert_off)
     {
-        ehdr->e_shoff += PAGE_SZ;
+        ehdr->e_shoff += (usize) total_len;
     }
-    if (!output_target(target_fname, target_buf, target_len, insert_offset,
-                       code_buf))
+    if (!output_target(target_fname, target, target_len, insert_off,
+                       thunk_buf, thunk_len, code_buf, code_len))
     {
         return false;
     }
@@ -245,10 +383,10 @@ static bool inject_code(struct s8 target_fname, u8 *target_buf,
 
 int main(int argc, char **argv)
 {
-    if (argc != 5)
+    assert(thunk_len < PGSIZE && !(thunk_len & 0x1));
+    if (argc != 4)
     {
-        printf("usage: elf_injector <target> <code> <entry offset>"
-               " <host entry offset>\n");
+        printf("usage: elf_injector <target> <code> <entry offset>\n");
         return EXIT_FAILURE;
     }
 
@@ -272,51 +410,48 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
-    size entry_offset = atoi(argv[3]);
-    if (entry_offset < 0 || entry_offset > code_stat.st_size - 1)
+    size code_entry_off = atoi(argv[3]);
+    if (code_entry_off < 0 || code_entry_off > code_stat.st_size - 4)
     {
         fprintf(stderr, "error: invalid entry offset\n");
         return EXIT_FAILURE;
     }
-    
-    size host_entry_offset = atoi(argv[4]);
-    if (host_entry_offset < 0 || host_entry_offset > code_stat.st_size - 1)
+
+    struct arena arena;
+    if (!new_arena(&arena, 1 << 20))
     {
-        fprintf(stderr, "error: invalid host entry offset\n");
+        fprintf(stderr, "error: out of memory\n");
         return EXIT_FAILURE;
     }
 
-    if (code_stat.st_size > PAGE_SZ)
-    {
-        fprintf(stderr, "error: code size can't exceed %d bytes\n",
-            PAGE_SZ);
-        return EXIT_FAILURE;
-    }
-
-    u8 code_buf[PAGE_SZ];
-    if (read(code_fd, code_buf, (usize) code_stat.st_size) != code_stat.st_size)
-    {
-        perror("read");
-        return EXIT_FAILURE;
-    }
-    close(code_fd);
-                
-    void *target_buf;
-    if ((target_buf = mmap(NULL, (usize) target_stat.st_size,
-                           PROT_READ | PROT_WRITE, MAP_PRIVATE,
-                           target_fd, 0)) == MAP_FAILED)
+    u8 *code;
+    if ((code = mmap(NULL, (usize) code_stat.st_size,
+                     PROT_READ | PROT_WRITE, MAP_PRIVATE,
+                     code_fd, 0)) == MAP_FAILED)
     {
         perror("mmap");
         return EXIT_FAILURE;
     }
+    close(code_fd);
+                
+    u8 *target;
+    if ((target = mmap(NULL, (usize) target_stat.st_size,
+                       PROT_READ | PROT_WRITE, MAP_PRIVATE,
+                       target_fd, 0)) == MAP_FAILED)
+    {
+        perror("mmap");
+        return EXIT_FAILURE;
+    }
+    close(target_fd);
 
-    if (!inject_code(target_fname, target_buf, target_stat.st_size, code_buf,
-                     code_stat.st_size, entry_offset, host_entry_offset))
+    if (!inject_code(&arena, target_fname, target, target_stat.st_size,
+                     code, code_stat.st_size, code_entry_off))
+
     {
         return EXIT_FAILURE;
     }
-        
-    munmap(target_buf, (usize) target_stat.st_size);
-    close(target_fd);
+    
+    munmap(target, (usize) target_stat.st_size);
+    munmap(target, (usize) code_stat.st_size);
     return EXIT_SUCCESS;
 }

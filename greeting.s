@@ -27,107 +27,88 @@
 	.fpu vfp
 	.type	_start, %function
 _start:
-	@ args = 0, pretend = 0, frame = 16
+	@ args = 0, pretend = 0, frame = 0
 	@ frame_needed = 0, uses_anonymous_args = 0
 	push	{r4, r5, r6, r7, r8, r9, r10, fp, lr}
-	mov	r8, r1
-	ldr	r10, .L22
-	sub	sp, sp, #20
-.LPIC0:
-	add	r10, pc, r10
-	mov	r6, #0
-	str	r0, [sp, #8]
-.L3:
 	mov	r3, #0
+	ldr	r4, .L22
+	mov	r10, r0
+.LPIC0:
+	add	r4, pc, r4
+	mov	r8, r1
+.L3:
 	mov	r7, #4
 	mov	r0, #1
-	add	r1, r10, r6
-	rsb	r2, r6, #13
-	mov	r4, r3
-	mov	r5, r3
+	add	r1, r4, r3
+	rsb	r2, r3, #13
 	.syntax divided
-@ 57 "greeting.c" 1
+@ 43 "greeting.c" 1
 	swi #0
 
 @ 0 "" 2
 	.arm
 	.syntax unified
 	cmp	r0, #0
-	add	r6, r6, r0
+	add	r3, r3, r0
 	ble	.L2
-	cmp	r6, #12
+	cmp	r3, #12
 	ble	.L3
 .L2:
-	ldr	r3, [sp, #8]
-	cmp	r3, #0
-	ble	.L1
-	ldr	r3, .L22+4
-	mov	fp, #0
-.LPIC1:
-	add	r3, pc, r3
-	str	r3, [sp, #12]
-	sub	r3, r8, #4
-	str	r3, [sp, #4]
-.L6:
-	ldr	r3, [sp, #4]
-	ldr	r10, [r3, #4]!
 	cmp	r10, #0
-	str	r3, [sp, #4]
+	pople	{r4, r5, r6, r7, r8, r9, r10, fp, pc}
+	ldr	fp, .L22+4
+	sub	r8, r8, #4
+.LPIC1:
+	add	fp, pc, fp
+	mov	r6, #0
+.L6:
+	ldr	r5, [r8, #4]!
+	cmp	r5, #0
 	beq	.L8
-	mov	r3, r10
-	ldrb	r2, [r3], #1	@ zero_extendqisi2
-	cmp	r2, #0
+	mov	r2, r5
+	ldrb	r3, [r2], #1	@ zero_extendqisi2
+	cmp	r3, #0
 	beq	.L8
-	mov	r8, #0
+	mov	r4, #0
 .L9:
-	ldrb	r6, [r3], #1	@ zero_extendqisi2
-	add	r8, r8, #1
-	cmp	r6, #0
+	ldrb	r3, [r2], #1	@ zero_extendqisi2
+	add	r4, r4, #1
+	cmp	r3, #0
 	bne	.L9
 	b	.L10
 .L21:
-	cmp	r8, r6
+	cmp	r4, r3
 	ble	.L8
 .L10:
-	mov	r3, #0
 	mov	r7, #4
 	mov	r0, #1
-	add	r1, r10, r6
-	sub	r2, r8, r6
-	mov	r4, r3
-	mov	r5, r3
+	add	r1, r5, r3
+	sub	r2, r4, r3
 	.syntax divided
-@ 57 "greeting.c" 1
+@ 43 "greeting.c" 1
 	swi #0
 
 @ 0 "" 2
 	.arm
 	.syntax unified
 	cmp	r0, #0
-	add	r6, r6, r0
+	add	r3, r3, r0
 	bgt	.L21
 .L8:
-	mov	r3, #0
 	mov	r0, #1
-	ldr	r1, [sp, #12]
 	mov	r7, #4
+	mov	r1, fp
 	mov	r2, r0
-	mov	r4, r3
-	mov	r5, r3
 	.syntax divided
-@ 57 "greeting.c" 1
+@ 43 "greeting.c" 1
 	swi #0
 
 @ 0 "" 2
 	.arm
 	.syntax unified
-	ldr	r3, [sp, #8]
-	add	fp, fp, r2
-	cmp	r3, fp
+	add	r6, r6, r2
+	cmp	r10, r6
 	bne	.L6
-.L1:
-	add	sp, sp, #20
-	@ sp needed
 	pop	{r4, r5, r6, r7, r8, r9, r10, fp, pc}
 .L23:
 	.align	2
