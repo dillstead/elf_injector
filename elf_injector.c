@@ -1,4 +1,3 @@
-// LD_PRELOAD=/lib/arm-linux-gnueabihf/libasan.so.6 ./elf_injector
 #define _DEFAULT_SOURCE
 #include <stdlib.h>
 #include <stdio.h>
@@ -224,7 +223,8 @@ static bool output_target(struct s8 target_fname, u8 *target_buf,
     if ((output_fd = open((char *) output_fname.data,
                           O_WRONLY | O_TRUNC | O_CREAT, 0755)) < 0)
     {
-        perror("open");
+        fprintf(stderr, "error: opening %s: %s\n", (char *) output_fname.data,
+                strerror(errno));
         return false;
     }
     
@@ -234,7 +234,8 @@ static bool output_target(struct s8 target_fname, u8 *target_buf,
         || write(output_fd, code_buf, (usize) code_len) != code_len
         || write(output_fd, target_buf + insert_off, (usize) remain_len) != remain_len)
     {
-        perror("write");
+        fprintf(stderr, "error: writing to %s: %s\n", (char *) output_fname.data,
+                strerror(errno));
         return false;
     }
     close(output_fd);
@@ -386,27 +387,30 @@ int main(int argc, char **argv)
     assert(thunk_len < PGSIZE && !(thunk_len & 0x1));
     if (argc != 4)
     {
-        printf("usage: elf_injector <target> <code> <entry offset>\n");
+        fprintf(stderr, "usage: elf_injector <target> <code> <entry offset>\n");
         return EXIT_FAILURE;
     }
 
     struct s8 target_fname = s8cstr(argv[1]);
-    struct s8 code_fname = s8cstr(argv[2]);
     int target_fd;
-    int code_fd;
-    if ((target_fd = open((char *) target_fname.data, O_RDWR)) < 0
-        || (code_fd = open((char *) code_fname.data, O_RDONLY)) < 0)
-    {
-        perror("open");
-        return EXIT_FAILURE;
-    }
-
     struct stat target_stat;
+    if ((target_fd = open((char *) target_fname.data, O_RDWR)) < 0
+        || fstat(target_fd, &target_stat) < 0)
+    {
+        fprintf(stderr, "error: opening %s: %s\n", (char *) target_fname.data,
+                strerror(errno));
+        return EXIT_FAILURE;
+                
+    }
+    
+    struct s8 code_fname = s8cstr(argv[2]);
+    int code_fd;
     struct stat code_stat;
-    if (fstat(target_fd, &target_stat) < 0
+    if ((code_fd = open((char *) code_fname.data, O_RDONLY)) < 0
         || fstat(code_fd, &code_stat) < 0)
     {
-        perror("fstat");
+        fprintf(stderr, "error: opening %s: %s\n", (char *) code_fname.data,
+                strerror(errno));
         return EXIT_FAILURE;
     }
 
@@ -429,7 +433,8 @@ int main(int argc, char **argv)
                      PROT_READ | PROT_WRITE, MAP_PRIVATE,
                      code_fd, 0)) == MAP_FAILED)
     {
-        perror("mmap");
+        fprintf(stderr, "error: mapping %s: %s\n", (char *) code_fname.data,
+                strerror(errno));
         return EXIT_FAILURE;
     }
     close(code_fd);
@@ -439,7 +444,8 @@ int main(int argc, char **argv)
                        PROT_READ | PROT_WRITE, MAP_PRIVATE,
                        target_fd, 0)) == MAP_FAILED)
     {
-        perror("mmap");
+        fprintf(stderr, "error: mapping %s: %s\n", (char *) target_fname.data,
+                strerror(errno));
         return EXIT_FAILURE;
     }
     close(target_fd);
