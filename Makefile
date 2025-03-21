@@ -5,13 +5,13 @@ CFLAGS = -Werror -std=c99 -Wall -Wextra -fno-diagnostics-color -O2
 endif
 
 %.s: %.c
-	$(CC) -O2 -Werror -Wall -Wextra -std=gnu99 -S -fpie -mgeneral-regs-only $<
+	$(CC) -O2 -Werror -Wall -Wextra -fno-builtin -std=gnu99 -mgeneral-regs-only -S -fpie $<
 
 %_strip.c: %.strip
 	python asmify.py $< > $@
 
 %_strip: %_strip.c
-	$(CC) -O2 -Werror -Wall -Wextra -std=gnu99 -fpie -mgeneral-regs-only -o $@ $< -nostdlib -static -lgcc
+	$(CC) -O2 -Werror -Wall -Wextra -std=gnu99 -fno-builtin -fpie -mgeneral-regs-only -o $@ $< -nostdlib -static -lgcc
 	objdump -d -S $@ > $@.asm
 	objcopy -O binary --only-section=.text $@ $@.bin
 

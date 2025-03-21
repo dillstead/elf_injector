@@ -78,7 +78,7 @@ static size thunk_off_host_entry = 184;
 
 struct s8
 {
-    u8  *data;
+    const u8  *data;
     size len;
 };
 

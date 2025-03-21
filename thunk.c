@@ -1,18 +1,22 @@
 // Thunk that loads and runs injected code and returns control
 // to the original entry point when it's finished. 
 #include <unistd.h>
-#include <stddef.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <syscall.h>
 
 typedef __UINT8_TYPE__   u8;
-typedef __INT32_TYPE__   b32;
+typedef __INT8_TYPE__    i8;
+typedef __UINT16_TYPE__  u16;
+typedef __INT16_TYPE__   i16;
+typedef __UINT32_TYPE__  u32;
 typedef __INT32_TYPE__   i32;
 typedef __UINT64_TYPE__  u64;
 typedef __INT64_TYPE__   i64;
 typedef __PTRDIFF_TYPE__ size;
+typedef __SIZE_TYPE__    usize;
 typedef __UINTPTR_TYPE__ uptr;
+typedef __INTPTR_TYPE__  iptr;
 typedef char             byte;
 
 #define PGBITS  12                         

@@ -1,3 +1,4 @@
+	.align	2
 .LC0:
 	.ascii	"Hello World!\012\000"
 	.align	2
