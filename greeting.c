@@ -54,10 +54,10 @@ static long syscall3(long n, long a, long b, long c)
     return ret;
 }
 
-// _start offset: XXX
-void _start(int argc, char **argv)
+// _start offset: 20
+void start(int argc, char **argv)
 {
-    full_write((const u8 *) "Hello World!\n", lengthof("Hello World!\n"));
+    SYSCALL3(SYS_write, 1, "Hello World!\n", lengthof("Hello World!\n"));
     for (int i = 0; i < argc; i++)
     {
         SYSCALL3(SYS_write, 1, argv[i], slen(argv[i]));

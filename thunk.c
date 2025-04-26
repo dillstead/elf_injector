@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <syscall.h>
+#include <elf.h>
 
 typedef __UINT8_TYPE__   u8;
 typedef __INT8_TYPE__    i8;
@@ -77,33 +78,56 @@ static long syscall6(long n, long a, long b, long c, long d, long e, long f)
 }
 
 // These values will be patched by elf_injector at injection time.
-static volatile size code_off = 0x00000001;        // offset 204
-static volatile size code_len = 0x00000002;        // offset 208
-static volatile size code_entry_off = 0x00000003;  // offset 212
-static volatile size host_entry = 0x00000004;      // offset 216
+size chunk_off = 0x00000001;
+size chunk_len = 0x00000002;
+size chunk_entry_off = 0x00000003;
 
-// _start offset: 0
-void _start(int argc, char **argv)
+void start(int argc, char **argv, char **env, Elf32_auxv_t *aux)
 {
-    int fd = -1;
-    if ((fd = (int) SYSCALL2(SYS_open, argv[0], O_RDONLY)) == -1)
+    int fd = (int) SYSCALL2(SYS_open, argv[0], O_RDONLY);
+    if (fd == -1)
     {
         goto cleanup;
     }
 
-    u8 *code;
-    if ((code = (u8 *) SYSCALL6(SYS_mmap2, NULL, code_len,
-                                PROT_READ | PROT_EXEC,
-                                MAP_PRIVATE, fd, code_off)) == MAP_FAILED)
+    u8 *chunk_base = (u8 *) SYSCALL6(SYS_mmap2, NULL, code_len, 
+                                     PROT_READ | PROT_WRITE | PROT_EXEC,
+                                     MAP_PRIVATE, fd, code_off);
+    if (chunk_base == MAP_FAILED)
     {
         goto cleanup;
     }
     
-    void (*code_entry)(int, char **)
-          = (void (*)(int, char **)) (code + code_entry_off);
-    code_entry(argc, argv);
-    SYSCALL2(SYS_munmap, code, code_len);
+    void (*chunk_entry)(int, char **, char **, Elf32_auxv_t *)
+        = (void (*)(int, char **, char **, Elf32_auxv_t *)) (code_base + code_entry_off);
+    chunk_entry(argc, argv, env, aux);
+    SYSCALL2(SYS_munmap, chunk_entry, code_len);
 cleanup:
     SYSCALL1(SYS_close, fd);
-    ((void (*)(void)) host_entry)();
+}
+
+__attribute__((naked, noreturn))
+void _thunk_start(void)
+{
+    __asm volatile (
+        "push    {r0-r11, lr}\n"
+        "ldr     r0, [sp, #52]\n"
+        "add     r1, sp, #56\n"
+        "add     r2, r1, r0, lsl #2\n"
+        "mov     r3, r2\n"
+        "add     r2, r2, #4\n"
+        "nz:\n"
+        "add     r3, r3, #4\n"
+        "ldr     r4, [r3]\n"
+        "cmp     r4, #0\n"
+        "bne     nz\n"
+        "add     r3, r3, #4\n"
+        "bl      start\n"
+        "pop     {r0-r11, lr}\n"
+        "ldr     ip, host_entry\n"
+        "bx      ip\n"
+        ".align  2\n"
+        "host_entry:\n"
+        ".word   5\n"
+        );
 }
