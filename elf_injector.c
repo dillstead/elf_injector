@@ -1,4 +1,4 @@
-// gcc -Werror -Wall -Wextra -Wno-error=unused-parameter -Wno-error=unused-function -Wno-error=unused-variable -Wconversion -Wno-error=sign-conversion -fno-builtin -std=gnu99 -mgeneral-regs-only -fsanitize-undefined-trap-on-error -nostdlib -g3 -o elf_injector_new elf_injector_new.coaded
+// gcc -Werror -Wall -Wextra -Wno-error=unused-parameter -Wno-error=unused-function -Wno-error=unused-variable -Wconversion -Wno-error=sign-conversion -fno-builtin -std=gnu99 -mgeneral-regs-only -fsanitize-undefined-trap-on-error -nostdlib -g3 -o elf_injector elf_injector.c
 #include <unistd.h>
 #include <fcntl.h>
 #include <dirent.h>
