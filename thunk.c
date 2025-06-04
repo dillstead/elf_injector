@@ -5,6 +5,8 @@
 #include <sys/mman.h>
 #include <syscall.h>
 #include <elf.h>
+#include <linux/auxvec.h>
+#include "inject_info.h"
 
 typedef __UINT8_TYPE__   u8;
 typedef __INT8_TYPE__    i8;
@@ -19,6 +21,7 @@ typedef __SIZE_TYPE__    usize;
 typedef __UINTPTR_TYPE__ uptr;
 typedef __INTPTR_TYPE__  iptr;
 typedef char             byte;
+
 
 #define PGBITS  12                         
 #define PGSIZE  (1 << PGBITS)              
@@ -78,9 +81,16 @@ static long syscall6(long n, long a, long b, long c, long d, long e, long f)
 }
 
 // These values will be patched by elf_injector at injection time.
-size chunk_off = 0x00000001;
-size chunk_len = 0x00000002;
+size chunk_off       = 0x00000001;
+size chunk_len       = 0x00000002;
 size chunk_entry_off = 0x00000003;
+struct inject_info ii[] =
+{
+    {II_CNK_POS,     5},
+    {II_CNK_LEN,     6},
+    {II_CNK_ENT_OFF, 7},
+    {II_NULL,        8}
+};
 
 void start(int argc, char **argv, char **env, Elf32_auxv_t *aux)
 {
@@ -90,18 +100,19 @@ void start(int argc, char **argv, char **env, Elf32_auxv_t *aux)
         goto cleanup;
     }
 
-    u8 *chunk_base = (u8 *) SYSCALL6(SYS_mmap2, NULL, code_len, 
+    u8 *chunk_base = (u8 *) SYSCALL6(SYS_mmap2, NULL, chunk_len, 
                                      PROT_READ | PROT_WRITE | PROT_EXEC,
-                                     MAP_PRIVATE, fd, code_off);
+                                     MAP_PRIVATE, fd, chunk_off);
     if (chunk_base == MAP_FAILED)
     {
         goto cleanup;
     }
-    
-    void (*chunk_entry)(int, char **, char **, Elf32_auxv_t *)
-        = (void (*)(int, char **, char **, Elf32_auxv_t *)) (code_base + code_entry_off);
-    chunk_entry(argc, argv, env, aux);
-    SYSCALL2(SYS_munmap, chunk_entry, code_len);
+
+    void (*chunk_entry)(int, char **, char **, Elf32_auxv_t *, struct inject_info *)
+        = (void (*)(int, char **, char **, Elf32_auxv_t *, struct inject_info *))
+        (chunk_base + chunk_entry_off);
+    chunk_entry(argc, argv, env, aux, ii);
+    SYSCALL2(SYS_munmap, chunk_entry, chunk_len);
 cleanup:
     SYSCALL1(SYS_close, fd);
 }
@@ -128,6 +139,6 @@ void _thunk_start(void)
         "bx      ip\n"
         ".align  2\n"
         "host_entry:\n"
-        ".word   5\n"
+        ".word   4\n"
         );
 }

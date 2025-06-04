@@ -1,7 +1,7 @@
 ifeq ($(BUILD),debug)
-CFLAGS = -Werror -std=c99 -Wall -Wextra -Wno-error=unused-parameter -Wno-error=unused-function -Wno-error=unused-variable -Wconversion -Wno-error=sign-conversion -fsanitize-undefined-trap-on-error -fno-diagnostics-color -g3
+CFLAGS = -Werror -std=c99 -Wall -Wextra -Wno-error=unused-parameter -Wno-error=unused-function -Wno-error=unused-variable -Wconversion -Wno-error=sign-conversion fno-builtin -fsanitize-undefined-trap-on-error -mgeneral-regs-only -fno-diagnostics-color -nostdlib -g3
 else
-CFLAGS = -Werror -std=c99 -Wall -Wextra -fno-diagnostics-color -O2
+CFLAGS = -Werror -std=c99 -fno-builtin -Wall -Wextra -nostdlib -mgeneral-regs-only -fno-diagnostics-color -O2
 endif
 
 %.s: %.c

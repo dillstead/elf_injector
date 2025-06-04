@@ -1,6 +1,8 @@
 #include <unistd.h>
+#include <elf.h>
 #include <stddef.h>
 #include <syscall.h>
+#include "inject_info.h"
 
 typedef __UINT8_TYPE__   u8;
 typedef __INT8_TYPE__    i8;
@@ -23,21 +25,6 @@ typedef char             byte;
 #define SYSCALL3(n, a, b, c) \
     syscall3(n,(long)(a),(long)(b),(long)(c))
 
-static i32 slen(const char *str)
-{
-    if (!str)
-    {
-        return 0;
-    }
-    
-    i32 len = 0;
-    while (*str++)
-    {
-        len++;
-    }
-    return len;
-}
-
 static long syscall3(long n, long a, long b, long c)
 {
     register long ret asm("r0");
@@ -54,13 +41,13 @@ static long syscall3(long n, long a, long b, long c)
     return ret;
 }
 
-// _start offset: 20
-void start(int argc, char **argv)
+// _start offset: 16
+void start(int argc, char **argv, char **env, Elf32_auxv_t *aux, struct inject_info *ii)
 {
+    (void) argc;
+    (void) argv;
+    (void) env;
+    (void) aux;
+    (void) ii;
     SYSCALL3(SYS_write, 1, "Hello World!\n", lengthof("Hello World!\n"));
-    for (int i = 0; i < argc; i++)
-    {
-        SYSCALL3(SYS_write, 1, argv[i], slen(argv[i]));
-        SYSCALL3(SYS_write, 1, "\n", lengthof("\n"));
-    }
 }
