@@ -1,4 +1,4 @@
-// gcc -Werror -Wall -Wextra -Wno-error=unused-parameter -Wno-error=unused-function -Wno-error=unused-variable -Wconversion -Wno-error=sign-conversion -fno-builtin -std=gnu99 -mgeneral-regs-only -fsanitize-undefined-trap-on-error -nostdlib -g3 -DDEBUG -o copy_chunk copy_chunk.c
+// gcc -Werror -Wall -Wextra -Wno-error=unused-parameter -Wno-error=unused-function -Wno-error=unused-variable -Wconversion -Wno-error=sign-conversion -fno-builtin -std=gnu99 -mgeneral-regs-only -fsanitize-undefined-trap-on-error -nostdlib -g3 -o copy_chunk copy_chunk.c
 #include <unistd.h>
 #include <fcntl.h>
 #include <dirent.h>
@@ -11,6 +11,7 @@
 #include <limits.h>
 #include "thunk_info.h"
 #include "inject_info.h"
+#include "fc.h"
 #ifdef STANDALONE
 #include "thunk.h"
 #include "chunk.h"
@@ -75,7 +76,7 @@ struct stat64
 #define lengthof(s) (countof(s) - 1)
 #define s8(s)       (struct s8){(u8 *)s, lengthof(s)}
 #define s8cstr(s)   (struct s8){(u8 *)s, strlen(s)}
-#define s8nul       (struct s8){(u8 *)"", 1}
+#define s8nulx       (struct s8){(u8 *)"", 1}
 
 #define SYSCALL1(n, a)                \
     syscall1(n,(long)(a))
@@ -255,6 +256,7 @@ static void *memcpy(void *d, const void *s, usize n)
 #ifdef DEBUG
 struct buf
 {
+
     u8 *buf;
     size cap;
     size len;
@@ -262,7 +264,7 @@ struct buf
     int err;
 };
 
-static u8 outbuf[128];
+static u8 outbuf[4096];
 static struct buf *stderr = &(struct buf) {outbuf, sizeof(outbuf), 0, 1, 0};
 
 void flush(struct buf *b)
@@ -423,6 +425,7 @@ static bool s8cat(struct arena *a, struct s8 *dst, struct s8 head,
 static int s8open(struct arena a, struct s8 path, int flags)
 {
     struct s8 tpath;
+    struct s8 s8nul = { &(u8) {0}, 1 };
     if (!s8cat(&a, &tpath, path, s8nul))
     {
         return -1;
@@ -434,6 +437,7 @@ static int s8open(struct arena a, struct s8 path, int flags)
 static int s8unlink(struct arena a, struct s8 path)
 {
     struct s8 tpath;
+    struct s8 s8nul = { &(u8) {0}, 1 };
     if (!s8cat(&a, &tpath, path, s8nul))
     {
         append_cstr(stderr, "error: out of memory\n");
@@ -446,6 +450,7 @@ static int s8rename(struct arena a, struct s8 oldpath, struct s8 newpath)
 {
     struct s8 toldpath;
     struct s8 tnewpath;
+    struct s8 s8nul = { &(u8) {0}, 1 };
     if (!s8cat(&a, &toldpath, oldpath, s8nul)
         || !s8cat(&a, &tnewpath, newpath, s8nul))
     {
@@ -459,6 +464,7 @@ static int s8rename(struct arena a, struct s8 oldpath, struct s8 newpath)
 static int s8chmod(struct arena a, struct s8 path, mode_t mode)
 {
     struct s8 tpath;
+    struct s8 s8nul = { &(u8) {0}, 1 };
     if (!s8cat(&a, &tpath, path, s8nul))
     {
         append_cstr(stderr, "error: out of memory\n");
@@ -470,6 +476,7 @@ static int s8chmod(struct arena a, struct s8 path, mode_t mode)
 static int s8chown(struct arena a, struct s8 path, uid_t own, gid_t grp)
 {
     struct s8 tpath;
+    struct s8 s8nul = { &(u8) {0}, 1 };
     if (!s8cat(&a, &tpath, path, s8nul))
     {
         append_cstr(stderr, "error: out of memory\n");
@@ -481,6 +488,7 @@ static int s8chown(struct arena a, struct s8 path, uid_t own, gid_t grp)
 static int s8stat64(struct arena a, struct s8 path, struct stat64 *sbuf)
 {
     struct s8 tpath;
+    struct s8 s8nul = { &(u8) {0}, 1 };
     if (!s8cat(&a, &tpath, path, s8nul))
     {
         append_cstr(stderr, "error: out of memory\n");
@@ -603,7 +611,9 @@ static bool get_exec_name(struct arena *perm, struct arena scratch,
                           struct s8 *ename)
 {
     int fd;
-    fd = (int) SYSCALL2(SYS_open, ".", O_RDONLY);
+    char curd[countof(".")];
+    FILL_CHARS(curd, '.', '\0');
+    fd = (int) SYSCALL2(SYS_open, curd, O_RDONLY);
     if (fd < 0)
     {
         append_cstr(stderr, "error: opening current directory\n");
@@ -972,8 +982,10 @@ static bool output(struct arena scratch, struct s8 fname, struct binary *bin,
 {
     bool success = false;
     struct s8 tname;
-
-    if (!s8cat(&scratch, &tname, fname, s8(".injected")))
+    char _injected[countof(".injected")];
+    FILL_CHARS(_injected, '.', 'i', 'n', 'j', 'e', 'c', 't', 'e', 'd', '\0');
+    struct s8 injected = s8cstr(_injected);
+    if (!s8cat(&scratch, &tname, fname, injected))
     {
         append_cstr(stderr, "error: out of memory\n");
         return false;
@@ -1053,9 +1065,13 @@ void start(int argc, char **argv, char **env, Elf32_auxv_t *aux, struct inject_i
     (void) argv;
     (void) env;
     (void) aux;
-        
-    struct arena perm = { 0 };
-    struct arena scratch = { 0 };
+
+    struct binary bin;
+    struct arena perm;
+    struct arena scratch;
+    memset(&bin, 0, sizeof(bin));
+    memset(&perm, 0, sizeof(scratch));
+    memset(&scratch, 0, sizeof(scratch));
     if (!new_arena(&perm, 1 << 12)
         || !new_arena(&scratch, 1 << 12))
     {
@@ -1082,7 +1098,6 @@ void start(int argc, char **argv, char **env, Elf32_auxv_t *aux, struct inject_i
     struct s8 me = s8cstr(argv[0]);
     struct s8 ename;
     size ins_off;
-    struct binary bin = { 0 };
     if (!get_exec_name(&perm, scratch, &ename)
         || !load(&perm, scratch, me, ename, aux, ii, &bin)
         || !inject(&bin, TNK_ENT_OFF, chunk_ent_off, &ins_off)
