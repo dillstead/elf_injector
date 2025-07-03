@@ -1,24 +1,36 @@
-__attribute((naked))
-void _start(void)
+#include <unistd.h>
+#include <elf.h>
+#include <stddef.h>
+#include <syscall.h>
+#include "inject_info.h"
+
+#define SYSCALL3(n, a, b, c) \
+    syscall3(n,(long)(a),(long)(b),(long)(c))
+
+static long syscall3(long n, long a, long b, long c)
 {
-    asm (
-        ".align	2\n"
-        ".LC0:\n"
-        ".ascii	\"Hello World!\\012\\000\"\n"
-        ".align	2\n"
-        "start:\n"
-        "ldr	r1, .L4\n"
-        "push	{r7, r9, lr}\n"
-        "mov	r0, #1\n"
-        "mov	r7, #4\n"
-        ".LPIC0:\n"
-        "add	r1, pc, r1\n"
-        "mov	r2, #13\n"
-        "swi     #0\n"
-        "pop	{r7, r9, pc}\n"
-        ".L5:\n"
-        ".align	2\n"
-        ".L4:\n"
-        ".word	.LC0-(.LPIC0+8)\n"
-        );
-};
+    register long ret asm("r0");
+    register long r7 asm("r7") = n;
+    register long r0 asm("r0") = a;
+    register long r1 asm("r1") = b;
+    register long r2 asm("r2") = c;
+    __asm volatile (
+        "swi #0\n"
+        : "=r"(ret)
+        : "r"(r7), "r"(r0), "r"(r1), "r"(r2)
+        : "r9", "r12", "r14", "memory"
+    );
+    return ret;
+}
+
+// _start offset: 16
+void _start(int argc, char **argv, char **env, Elf32_auxv_t *aux, struct inject_info *ii)
+{
+    (void) argc;
+    (void) argv;
+    (void) env;
+    (void) aux;
+    (void) ii;
+    char greeting[] = {'H', 'e', 'l', 'l'. 'o', ' ', 'W', 'o', 'r', 'l', 'd', '\n' };
+    SYSCALL3(SYS_write, 1, greeting, 12);
+}

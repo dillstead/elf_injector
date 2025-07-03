@@ -829,8 +829,8 @@ static void log_insert(size len, struct s8 type, size ent_off, size ins_off)
     append_str(stdout, val);
     append_cstr(stdout, " byte ");
     append_s8(stdout, type);
-    append_cstr(stdout, " at pos 0x");
-    xuitoa((unsigned int) ins_off, val);
+    append_cstr(stdout, " at pos ");
+    duitoa((unsigned int) ins_off, val);
     append_str(stdout, val);
     append_cstr(stdout, ", start 0x");
     xuitoa((unsigned int) (ins_off + ent_off), val);
