@@ -3,6 +3,9 @@
 #include <stddef.h>
 #include <syscall.h>
 #include "../inc/inject_info.h"
+#include "fc.h"
+
+#define countof(a)  (sizeof(a) / sizeof(*(a)))
 
 #define SYSCALL3(n, a, b, c) \
     syscall3(n,(long)(a),(long)(b),(long)(c))
@@ -23,7 +26,7 @@ static long syscall3(long n, long a, long b, long c)
     return ret;
 }
 
-// _start offset: 16
+// _start offset: 0
 void _start(int argc, char **argv, char **env, Elf32_auxv_t *aux, struct inject_info *ii)
 {
     (void) argc;
@@ -31,6 +34,8 @@ void _start(int argc, char **argv, char **env, Elf32_auxv_t *aux, struct inject_
     (void) env;
     (void) aux;
     (void) ii;
-    char greeting[] = {'H', 'e', 'l', 'l', 'o', ' ', 'W', 'o', 'r', 'l', 'd', '\n' };
+    
+    char greeting[countof("Hello World\n")];
+    FILL_CHARS(greeting, 'H', 'e', 'l', 'l', 'o', ' ', 'W', 'o', 'r', 'l', 'd', '\n');
     SYSCALL3(SYS_write, 1, greeting, 12);
 }
