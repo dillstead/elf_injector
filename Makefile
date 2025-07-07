@@ -1,29 +1,21 @@
-ifeq ($(BUILD),debug)
-CFLAGS = -Werror -std=c99 -Wall -Wextra -Wno-error=unused-parameter -Wno-error=unused-function -Wno-error=unused-variable -Wconversion -Wno-error=sign-conversion fno-builtin -fsanitize-undefined-trap-on-error -mgeneral-regs-only -fno-diagnostics-color -nostdlib -g3
-else
-CFLAGS = -Werror -std=c99 -fno-builtin -Wall -Wextra -nostdlib -mgeneral-regs-only -fno-diagnostics-color -O2
-endif
+CC = gcc
+CFLAGS = -Werror -std=gnu99 -fno-builtin -Wall -Wextra -fno-diagnostics-color -O2
+VPATH = src
 
-%.s: %.c
-	$(CC) -O2 -Werror -Wall -Wextra -fno-builtin -std=gnu99 -mgeneral-regs-only -S -fpie $<
+%.o: %.c
+	$(CC) $(CFLAGS) -c $< -o $@
 
-%_strip.c: %.strip
-	python asmify.py $< > $@
+elf_injector: elf_injector.o
+	$(CC) -nostdlib $< -o $@
 
-%_strip: %_strip.c
-	$(CC) -O2 -Werror -Wall -Wextra -std=gnu99 -fno-builtin -fpie -mgeneral-regs-only -o $@ $< -nostdlib
-	objdump -d -S $@ > $@.asm
-	objcopy -O binary --only-section=.text $@ $@.bin
+test: test.o
+	$(CC) $< -o $@
 
-test: test.c
-elf_injector: elf_injector.c
-	$(CC) $(CFLAGS) -o $@ $<
+.PHONY: all clean
+
+all: elf_injector test
 
 clean:
-	-rm *.s
-	-rm *_strip.c
-	-rm *_strip.asm
-	-rm *_strip.bin
-	-rm *_strip
+	-rm *.o
 	-rm elf_injector
 	-rm test

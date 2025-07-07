@@ -1,0 +1,91 @@
+	.align	2
+start:
+	push	{r4, r5, r6, r7, r8, r9, r10, fp, lr}
+	sub	sp, sp, #20
+	mov	r8, r1
+	mov	fp, r0
+	mov	r7, #5
+	ldr	r0, [r1]
+	str	r2, [sp, #12]
+	mov	r1, #0
+	swi     #0
+	cmn	r0, #1
+	mov	r4, r0
+	beq	.L3
+	ldr	r6, .L10
+	mov	r10, r3
+.LPIC0:
+	add	r6, pc, r6
+	mov	r0, r1
+	mov	r7, #192
+	ldm	r6, {r1, r5}
+	mov	r2, #7
+	mov	r3, #2
+	swi     #0
+	cmn	r0, #1
+	mov	ip, r0
+	beq	.L3
+	mov	r1, r8
+	ldr	r8, [r6, #8]
+	str	ip, [r6, #40]
+	add	r8, ip, r8
+	add	ip, r6, #12
+	mov	r0, fp
+	ldr	r2, [sp, #12]
+	mov	r3, r10
+	str	ip, [sp]
+	blx	r8
+	mov	r7, #91
+	mov	r0, r8
+	ldr	r1, [r6]
+	swi     #0
+.L3:
+	mov	r7, #6
+	mov	r0, r4
+	swi     #0
+	add	sp, sp, #20
+	pop	{r4, r5, r6, r7, r8, r9, r10, fp, pc}
+.L11:
+	.align	2
+.L10:
+	.word	.LANCHOR0-(.LPIC0+8)
+        
+	.align	2
+_thunk_start:
+	push    {r0-r11, lr}
+        ldr     r0, [sp, #52]
+        add     r1, sp, #56
+        add     r2, r1, r0, lsl #2
+        mov     r3, r2
+        add     r2, r2, #4
+nz:
+        add     r3, r3, #4
+        ldr     r4, [r3]
+        cmp     r4, #0
+        bne     nz
+        add     r3, r3, #4
+        bl      start
+        pop     {r0-r11, lr}
+        ldr     ip, host_entry
+        bx      ip
+        .align  2
+host_entry:
+        .word   4
+.LANCHOR0:
+chunk_len:
+	.word	2
+chunk_off:
+	.word	1
+chunk_entry_off:
+	.word	3
+ii:
+	.word	1
+	.word	5
+	.word	2
+	.word	6
+	.word	3
+	.word	7
+	.word	4
+	.word	8
+	.word	0
+	.word	9

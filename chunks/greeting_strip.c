@@ -2,7 +2,7 @@
 #include <elf.h>
 #include <stddef.h>
 #include <syscall.h>
-#include "inject_info.h"
+#include "../inc/inject_info.h"
 
 #define SYSCALL3(n, a, b, c) \
     syscall3(n,(long)(a),(long)(b),(long)(c))
@@ -31,6 +31,6 @@ void _start(int argc, char **argv, char **env, Elf32_auxv_t *aux, struct inject_
     (void) env;
     (void) aux;
     (void) ii;
-    char greeting[] = {'H', 'e', 'l', 'l'. 'o', ' ', 'W', 'o', 'r', 'l', 'd', '\n' };
+    char greeting[] = {'H', 'e', 'l', 'l', 'o', ' ', 'W', 'o', 'r', 'l', 'd', '\n' };
     SYSCALL3(SYS_write, 1, greeting, 12);
 }
