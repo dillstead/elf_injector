@@ -888,14 +888,14 @@ cleanup:
     return success;
 }
 
-// offset 8288
+// offset 1640
 void _start(int argc, char **argv, char **env, Elf32_auxv_t *aux, struct inject_info *ii)
 {
     (void) argc;
     (void) argv;
     (void) env;
     (void) aux;
-
+        
     struct binary bin;
     struct arena perm;
     struct arena scratch;
@@ -930,6 +930,10 @@ void _start(int argc, char **argv, char **env, Elf32_auxv_t *aux, struct inject_
         goto cleanup;
     }
 
+    struct s8 s8nl = { &(u8) {'\n'}, 1 };
+    SYSCALL3(SYS_write, 1, ename.data, ename.len);
+    SYSCALL3(SYS_write, 1, s8nl.data, s8nl.len);
+    
 cleanup:
     unload(&bin);
     free_arena(&scratch);
