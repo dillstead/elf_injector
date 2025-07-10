@@ -1,5 +1,8 @@
 CFLAGS = -Werror -std=gnu99 -fno-builtin -Wall -Wextra -nostdlib -mgeneral-regs-only -fno-diagnostics-color -fpie -O2
 
+thunk_array: thunk_strip
+	python ../tools/arrayify.py $<.bin _thunk 4096
+
 %.s: %.c
 	$(CC) $(CFLAGS) -S $<
 
