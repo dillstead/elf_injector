@@ -19,6 +19,6 @@ thunk_array: thunk_strip
 all: thunk_strip
 
 clean: 
-	-rm *_strip
-	-rm *_strip.asm
-	-rm *_strip.bin
+	rm -f *_strip
+	rm -f *_strip.asm
+	rm -f *_strip.bin

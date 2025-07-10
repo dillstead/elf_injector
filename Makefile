@@ -16,6 +16,6 @@ test: test.o
 all: elf_injector test
 
 clean:
-	-rm *.o
-	-rm elf_injector
-	-rm test
+	rm -f *.o
+	rm -f elf_injector
+	rm -f test

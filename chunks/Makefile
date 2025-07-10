@@ -16,7 +16,7 @@ CFLAGS = -Werror -std=gnu99 -fno-builtin -Wall -Wextra -nostdlib -mgeneral-regs-
 all: greeting_strip startup_dump_strip copy_chunk_strip
 
 clean: 
-	-rm *_strip
-	-rm *_strip.asm
-	-rm *_strip.bin
+	rm -f *_strip
+	rm -f *_strip.asm
+	rm -f *_strip.bin
 
