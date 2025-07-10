@@ -6,7 +6,7 @@
 #include <syscall.h>
 #include <elf.h>
 #include <linux/auxvec.h>
-#include "inject_info.h"
+#include "../inc/inject_info.h"
 
 typedef __UINT8_TYPE__   u8;
 typedef __INT8_TYPE__    i8;
