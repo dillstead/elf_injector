@@ -1,4 +1,3 @@
-// gcc -Werror -Wall -Wextra -Wno-error=unused-parameter -Wno-error=unused-function -Wno-error=unused-variable -Wconversion -Wno-error=sign-conversion -fno-builtin -std=gnu99 -mgeneral-regs-only -fsanitize-undefined-trap-on-error -nostdlib -g3 -o elf_injector elf_injector.c
 #include <unistd.h>
 #include <fcntl.h>
 #include <dirent.h>
@@ -719,7 +718,7 @@ static bool inject(struct binary *bin, size thunk_ent_off, size chunk_ent_off,
     thunk_ent_off += bin->pad1;
 
     // The thunk must be small enough to fit in the padding at the end of the
-    // text section,  If if's larger, it might spill over into the next
+    // text segment,  If if's larger, it might spill over into the next
     // segment in memory if it happens to be mapped adjacent to the end
     // of the text segment.
     if (thunk_len > (-ins_off & (PGSIZE - 1)))
@@ -729,7 +728,7 @@ static bool inject(struct binary *bin, size thunk_ent_off, size chunk_ent_off,
     }
     
     // File offsets and virtual address of each segment must be modular         
-    // congruent to the page size.  The code is inserted directly after
+    // congruent to the page size.  The chunk is inserted directly after
     // the thunk so there must be adequate padding to ensure the total
     // number of bytes inserted in a multiple of page size.
     bin->pad2 = -(thunk_len + bin->chunk.len) & (PGSIZE - 1);
